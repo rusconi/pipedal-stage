@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import { SyntheticEvent } from 'react';
+import { Plus as LucidePlus, Trash as LucideTrash, FolderOpen as LucideFolderOpen, Cable as LucideCable } from 'lucide-react';
 import { Theme } from '@mui/material/styles';
 import WithStyles, { withTheme } from './WithStyles';
 import { withStyles } from "tss-react/mui";
@@ -50,7 +51,14 @@ import MidiBindingsDialog from './MidiBindingsDialog';
 import PluginPresetSelector from './PluginPresetSelector';
 import OldDeleteIcon from "./svg/old_delete_outline_24dp.svg?react";
 import MidiIcon from "./svg/ic_midi.svg?react";
-import { isDarkMode } from './DarkMode';
+import { isDarkMode, isStageTheme } from './DarkMode';
+import SnapshotStrip from './SnapshotStrip';
+import GigView from './GigView';
+import TunerOverlay from './TunerOverlay';
+import TempoSyncPicker from './TempoSyncPicker';
+import { startIdleDim } from './IdleDim';
+import { onScreenKeyboardEnabled } from './OnScreenKeyboard';
+import { STAGE } from './StageTheme';
 import Snapshot0Icon from "./svg/snapshot_0.svg?react";
 import Snapshot1Icon from "./svg/snapshot_1.svg?react";
 import Snapshot2Icon from "./svg/snapshot_2.svg?react";
@@ -72,11 +80,15 @@ const SHOW_ICON_THRESHHOLD = 475;
 const DISPLAY_AUTHOR_THRESHHOLD = 750;
 const DISPLAY_AUTHOR_SPLIT_THRESHOLD = 500;
 const HORIZONTAL_CONTROL_SCROLL_HEIGHT_BREAK = 500;
+// Stage theme: enlarge the plugin control panel (knobs, labels, values) on wide screens
+// so a 7" kiosk isn't half empty. CSS zoom re-lays-out (unlike transform), and pointer
+// coordinates are mapped by the browser.
+const STAGE_CONTROL_ZOOM = 1.15;
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 // const HORIZONTAL_LAYOUT_MQ = "@media (max-height: " + HORIZONTAL_CONTROL_SCROLL_HEIGHT_BREAK + "px)";
 
-const styles = ({ palette }: Theme) => {
+const styles = ({ palette, stage }: Theme) => {
     return {
         frame: css({
             position: "absolute", display: "flex", flexDirection: "column", flexWrap: "nowrap",
@@ -102,12 +114,14 @@ const styles = ({ palette }: Theme) => {
             flex: "0 0 64px", width: "100%", paddingLeft: 24, paddingRight: 16, paddingBottom: 16
         }),
         controlContent: css({
-            flex: "1 1 auto", width: "100%", overflowY: "hidden", minHeight: 185
+            flex: "1 1 auto", width: "100%", overflowY: "hidden", minHeight: stage ? 110 : 185
         }),
         controlContentSmall: css({
             flex: "0 0 162px", width: "100%", height: 162, overflowY: "hidden",
         }),
-        title: css({ fontSize: "1.1rem", fontWeight: 700, marginRight: 8, textOverflow: "ellipsis", whiteSpace: "nowrap", opacity: 0.75 }),
+        title: css(stage
+            ? { fontFamily: STAGE.displayFont, fontSize: "1.3rem", fontWeight: 400, letterSpacing: "0.02em", marginRight: 8, textOverflow: "ellipsis", whiteSpace: "nowrap", opacity: 0.95 }
+            : { fontSize: "1.1rem", fontWeight: 700, marginRight: 8, textOverflow: "ellipsis", whiteSpace: "nowrap", opacity: 0.75 }),
         author: css({ fontWeight: 500, fontSize: "0.8rem", marginRight: 8, textOverflow: "ellipsis", whiteSpace: "nowrap", opacity: 0.75 })
     }
 };
@@ -125,6 +139,7 @@ interface MainState {
     selectedSnapshot: number;
     loadDialogOpen: boolean;
     snapshotDialogOpen: boolean;
+    gigViewOpen: boolean;
     pedalboard: Pedalboard;
     addMenuAnchorEl: HTMLElement | null;
     splitControlBar: boolean;
@@ -174,6 +189,7 @@ export const MainPage =
                         selectedSnapshot: -1,
                         loadDialogOpen: false,
                         snapshotDialogOpen: false,
+                        gigViewOpen: false,
                         displayNameDialogOpen: false,
                         pedalboard: pedalboard,
                         addMenuAnchorEl: null,
@@ -242,11 +258,17 @@ export const MainPage =
                     this.setState({ showMidiBindingsDialog: true });
                 }
                 handleEnableCurrentItemChanged(event: any): void {
-                    let newValue = event.target.checked;
+                    // Toggle from the model's state, not event.target.checked, and from
+                    // onClick rather than onChange: on touch, Chromium delivers mousedown/
+                    // mouseup/click in one task, and React 19 flushes MUI's pending ripple/
+                    // focus updates during the click's capture phase, rewriting the
+                    // controlled `checked` from the stale prop before change detection
+                    // runs, so onChange never fires (seen on the kiosk touchscreen).
+                    // Don't preventDefault: the native toggle keeps the input's checked
+                    // property in step with React's state once it re-renders.
                     let item = this.getSelectedPedalboardItem();
                     if (item != null) {
-                        this.model.setPedalboardItemEnabled(item.getInstanceId(), newValue);
-
+                        this.model.setPedalboardItemEnabled(item.getInstanceId(), !item.isEnabled);
                     }
                 }
                 handleSelectPluginPreset(instanceId: number, presetInstanceId: number) {
@@ -290,6 +312,8 @@ export const MainPage =
                 }
 
                 componentDidMount() {
+
+                    if (onScreenKeyboardEnabled()) startIdleDim(this.model); // kiosk only
                     super.componentDidMount();
                     this.model.pedalboard.addOnChangedHandler(this.onPedalboardChanged);
                     this.model.selectedSnapshot.addOnChangedHandler(this.onSelectedSnapshotChanged);
@@ -502,6 +526,7 @@ export const MainPage =
                                                             pluginType={uiPlugin.plugin_type}
                                                             color={getIconColor(pedalboardItem?.iconColor ?? "")}
                                                             size={24}
+                                                            hintName={pedalboardItem?.title || uiPlugin.name}
                                                         />
                                                     </div>
                                                 )}
@@ -523,6 +548,7 @@ export const MainPage =
                                                             pluginType={uiPlugin.plugin_type}
                                                             color={getIconColor(pedalboardItem?.iconColor ?? "")}
                                                             size={24}
+                                                            hintName={pedalboardItem?.title || uiPlugin.name}
                                                         />
                                                     </div>
                                                 )}
@@ -676,11 +702,11 @@ export const MainPage =
                                     display: "flex", flexFlow: "row nowrap", alignItems: "center", justifyContent: "center", minWidth: 0,
                                     width: "100%", height: 48, paddingLeft: 16, paddingRight: 16
                                 }} >
-                                    <div style={{ flex: "0 0 auto", width: this.state.splitControlBar ? undefined : 60 }} >
-                                        <div style={{ display: bypassVisible ? "block" : "none", width: this.state.splitControlBar ? undefined : 60 }} >
+                                    <div style={{ flex: "0 0 auto" }} >
+                                        <div style={{ display: bypassVisible ? "flex" : "none", flexFlow: "row nowrap", alignItems: "center" }} >
                                             <ToolTipEx title="Bypass"
                                             >
-                                                <Switch color="secondary" checked={bypassChecked} onChange={this.handleEnableCurrentItemChanged} />
+                                                <Switch color="secondary" checked={bypassChecked} onClick={this.handleEnableCurrentItemChanged} onChange={() => { }} />
                                             </ToolTipEx>
                                         </div>
                                     </div>
@@ -700,7 +726,8 @@ export const MainPage =
 
                                             <div style={{ flex: "0 0 auto", display: (canInsert || canAppend) ? "block" : "none" }}>
                                                 <IconButtonEx tooltip="Add pedal slot" onClick={(e) => { this.onAddClick(e) }} size="large">
-                                                    <AddIcon style={{ height: 24, width: 24, fill: this.props.theme.palette.text.primary, opacity: 0.6 }} />
+                                                    {isStageTheme() ? <LucidePlus size={22} strokeWidth={1.75} style={{ color: this.props.theme.palette.text.primary, opacity: 0.8 }} />
+                                                        : <AddIcon style={{ height: 24, width: 24, fill: this.props.theme.palette.text.primary, opacity: 0.6 }} />}
                                                 </IconButtonEx>
                                                 <Menu
                                                     id="add-menu"
@@ -721,7 +748,8 @@ export const MainPage =
                                                 <IconButtonEx tooltip="Delete pedal"
                                                     onClick={() => { this.onDeletePedal(pedalboardItem?.instanceId ?? -1) }}
                                                     size="large">
-                                                    <OldDeleteIcon style={{ height: 24, width: 24, fill: this.props.theme.palette.text.primary, opacity: 0.6 }} />
+                                                    {isStageTheme() ? <LucideTrash size={22} strokeWidth={1.75} style={{ color: this.props.theme.palette.text.primary, opacity: 0.8 }} />
+                                                        : <OldDeleteIcon style={{ height: 24, width: 24, fill: this.props.theme.palette.text.primary, opacity: 0.6 }} />}
                                                 </IconButtonEx>
                                             </div>
                                             <div style={{ flex: "0 0 auto" }}>
@@ -732,10 +760,10 @@ export const MainPage =
                                                     tooltip="Load plugin"
                                                     onClick={this.onLoadClick}
                                                     disabled={this.state.selectedPedal === -1 || (!canLoad) || (this.getSelectedPedalboardItem()?.isSplit() ?? true)}
-                                                    startIcon={<InputIcon />}
+                                                    startIcon={isStageTheme() ? <LucideFolderOpen size={20} strokeWidth={1.75} /> : <InputIcon />}
                                                     style={{
                                                         textTransform: "none",
-                                                        background: (isDarkMode() ? "#6750A4" : undefined)
+                                                        background: (isStageTheme() ? undefined : isDarkMode() ? "#6750A4" : undefined)
                                                     }}
                                                 >
                                                     Load
@@ -745,7 +773,8 @@ export const MainPage =
                                                 <IconButtonEx tooltip="MIDI bindings"
                                                     onClick={(e) => { this.handleMidiConfiguration(instanceId); }}
                                                     size="large">
-                                                    <MidiIcon style={{ height: 24, width: 24, fill: this.props.theme.palette.text.primary, opacity: 0.6 }} />
+                                                    {isStageTheme() ? <LucideCable size={22} strokeWidth={1.75} style={{ color: this.props.theme.palette.text.primary, opacity: 0.8 }} />
+                                                        : <MidiIcon style={{ height: 24, width: 24, fill: this.props.theme.palette.text.primary, opacity: 0.6 }} />}
                                                 </IconButtonEx>
                                             </div>
                                             <div style={{ flex: "0 0 auto" }}>
@@ -768,7 +797,11 @@ export const MainPage =
                                     </div>
                                 )
                             }
-                            <div id="mainPageControls" className={horizontalScrollLayout ? classes.controlContentSmall : classes.controlContent}>
+                            <div id="mainPageControls" className={horizontalScrollLayout ? classes.controlContentSmall : classes.controlContent}
+                                style={{ zoom: (this.props.theme.stage && !horizontalScrollLayout) ? STAGE_CONTROL_ZOOM : undefined }}
+                                // Stage: re-keyed per block so the panel fades in on block change (see App.tsx @keyframes stageFadeIn).
+                                key={this.props.theme.stage ? "controls-" + this.state.selectedPedal : "controls"}
+                                data-stage-fade={this.props.theme.stage ? "1" : undefined}>
                                 {
                                     missing ? (
                                         <div style={{ marginLeft: 40, marginTop: 20 }}>
@@ -787,6 +820,18 @@ export const MainPage =
                                         )
                                 }
                             </div>
+                            {(this.props.theme.stage && !horizontalScrollLayout) && (
+                                <SnapshotStrip pedalboard={this.state.pedalboard} selectedSnapshot={this.state.selectedSnapshot}
+                                    onOpenGigView={() => this.setState({ gigViewOpen: true })} />
+                            )}
+                            {this.props.theme.stage && (
+                                <GigView open={this.state.gigViewOpen} pedalboard={this.state.pedalboard}
+                                    selectedSnapshot={this.state.selectedSnapshot} onClose={() => this.setState({ gigViewOpen: false })} />
+                            )}
+                            {this.props.theme.stage && (
+                                <TunerOverlay pedalboard={this.state.pedalboard} />
+                            )}
+                            <TempoSyncPicker primaryColor={this.props.theme.palette.primary.main} />
                             <MidiBindingsDialog open={this.state.showMidiBindingsDialog}
                                 onClose={() => this.setState({ showMidiBindingsDialog: false })}
                             />

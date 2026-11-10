@@ -30,6 +30,7 @@ import { PiPedalModel, PiPedalModelFactory } from './PiPedalModel';
 import { PluginType } from './Lv2Plugin';
 import ButtonBase from '@mui/material/ButtonBase';
 import Typography from '@mui/material/Typography';
+import { STAGE } from './StageTheme';
 import PluginIcon, { getIconColor, SelectIconUri } from './PluginIcon';
 import { SelectHoverBackground } from './SelectHoverBackground';
 import SvgPathBuilder from './SvgPathBuilder';
@@ -37,7 +38,7 @@ import Draggable from './Draggable'
 import Rect from './Rect';
 import { PiPedalStateError } from './PiPedalError';
 import Utility from './Utility';
-import { isDarkMode } from './DarkMode';
+import { isDarkMode, isStageTheme } from './DarkMode';
 import {
     Pedalboard, PedalboardItem, PedalboardSplitItem, SplitType
 } from './Pedalboard';
@@ -53,8 +54,9 @@ const END_CONTROL = Pedalboard.END_CONTROL_ID;
 const START_PEDALBOARD_ITEM_URI = Pedalboard.START_PEDALBOARD_ITEM_URI;
 const END_PEDALBOARD_ITEM_URI = Pedalboard.END_PEDALBOARD_ITEM_URI;
 
-const ENABLED_CONNECTOR_COLOR = isDarkMode() ? "#CCC" : "#666";
-const DISABLED_CONNECTOR_COLOR = isDarkMode() ? "#666" : "#CCC";
+// Stage theme: wires recede (dim, thinner); the tiles and the selection glow carry the eye.
+const ENABLED_CONNECTOR_COLOR = isStageTheme() ? "#5a5e66" : isDarkMode() ? "#CCC" : "#666";
+const DISABLED_CONNECTOR_COLOR = isStageTheme() ? STAGE.border : isDarkMode() ? "#666" : "#CCC";
 
 
 
@@ -62,12 +64,12 @@ const CELL_WIDTH: number = 96;
 const CELL_HEIGHT: number = 64;
 const FRAME_SIZE: number = 36;
 
-const STROKE_WIDTH = 3;
-const STEREO_STROKE_WIDTH = 6;
+const STROKE_WIDTH = isStageTheme() ? 2 : 3;
+const STEREO_STROKE_WIDTH = isStageTheme() ? 5 : 6;
 
 
-const I_SVG_STROKE_WIDTH = 3;
-const I_SVG_STEREO_STROKE_WIDTH = 6;
+const I_SVG_STROKE_WIDTH = isStageTheme() ? 2 : 3;
+const I_SVG_STEREO_STROKE_WIDTH = isStageTheme() ? 5 : 6;
 
 const SVG_STROKE_WIDTH = I_SVG_STROKE_WIDTH.toString();
 const SVG_STEREO_STROKE_WIDTH = I_SVG_STEREO_STROKE_WIDTH.toString();
@@ -168,12 +170,14 @@ const pedalboardStyles = (theme: Theme) => createStyles({
         alignItems: "center",
         justifyContent: "center",
         position: "relative",
-        background: theme.palette.background.paper,
+        background: theme.stage ? STAGE.panelGradient : theme.palette.background.paper,
+        boxShadow: theme.stage ? `${STAGE.innerHighlight}, ${STAGE.shadow}` : undefined,
 
         width: FRAME_SIZE,
         height: FRAME_SIZE,
-        borderColor: "#777",
-        borderWidth: 2,
+        borderColor: theme.stage ? STAGE.wire : "#777",
+        borderWidth: theme.stage ? 1 : 2,
+        transition: theme.stage ? `box-shadow ${STAGE.ease}, border-color ${STAGE.ease}` : undefined,
         borderStyle: "solid",
         overflow: "hidden",
         padding: 0,
@@ -185,15 +189,16 @@ const pedalboardStyles = (theme: Theme) => createStyles({
         alignItems: "center",
         justifyContent: "center",
         position: "relative",
-        background: theme.palette.background.paper,
+        background: theme.stage ? STAGE.panelGradient : theme.palette.background.paper,
         width: FRAME_SIZE,
         height: FRAME_SIZE,
         borderColor: theme.palette.primary.main,
-        borderWidth: "2.0px",
+        borderWidth: theme.stage ? "1.5px" : "2.0px",
         borderStyle: "solid",
         overflow: "hidden",
         borderRadius: 8,
-        boxShadow: "0 0 6px 0px " + theme.palette.primary.main + "C0"
+        boxShadow: theme.stage ? `0 0 10px 1px ${theme.palette.primary.main}90, ${STAGE.shadow}` : "0 0 6px 0px " + theme.palette.primary.main + "C0",
+        transition: theme.stage ? `box-shadow ${STAGE.ease}, border-color ${STAGE.ease}` : undefined
     }),
     borderlessIconFrame: css({
 
@@ -221,15 +226,15 @@ const pedalboardStyles = (theme: Theme) => createStyles({
     }),
     stroke: css({
         position: "absolute",
-        background: "#888"
+        background: theme.stage ? "#5a5e66" : "#888"
     }),
     stereoStrokeOuter: css({
         position: "absolute",
-        background: "#888"
+        background: theme.stage ? "#5a5e66" : "#888"
     }),
     stereoStrokeInner: css({
         position: "absolute",
-        background: "#888"
+        background: theme.stage ? "#5a5e66" : "#888"
     }),
 
 });
@@ -775,7 +780,31 @@ const PedalboardView =
 
                 }
 
+                // Stage theme: a second tap on the same tile within 400 ms toggles its bypass
+                // (Quad Cortex behaviour). Own detection: touch double-taps don't reliably
+                // produce dblclick.
+                private lastTapId: number | undefined = undefined;
+                private lastTapTime = 0;
+                private stageDoubleTap(instanceId?: number): boolean {
+                    if (!this.props.theme.stage || !instanceId) return false;
+                    let now = performance.now();
+                    let isDouble = this.lastTapId === instanceId && (now - this.lastTapTime) < 400;
+                    this.lastTapId = instanceId;
+                    this.lastTapTime = isDouble ? 0 : now;
+                    if (!isDouble) return false;
+                    let item: PedalboardItem | undefined | null;
+                    try { item = this.state.pedalboard?.getItem(instanceId); } catch { return false; }
+                    if (!item || item.isStart() || item.isEnd() || item.isSplit() || item.isEmpty()) return false;
+                    this.model.setPedalboardItemEnabled(instanceId, !item.isEnabled);
+                    return true;
+                }
+
                 onItemClick(e: SyntheticEvent, instanceId?: number): void {
+                    if (this.stageDoubleTap(instanceId)) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return;
+                    }
                     if (instanceId) {
                         this.setSelection(instanceId);
                     }
@@ -789,6 +818,12 @@ const PedalboardView =
                 onItemDoubleClick(event: SyntheticEvent, instanceId?: number): void {
                     event.preventDefault();
                     event.stopPropagation();
+                    if (this.props.theme.stage) {
+                        // Stage: double-tap toggles bypass (handled in onItemClick). The stock
+                        // action (open the Load Plugin dialog) must not run as well: a browser
+                        // dblclick after two taps would open it and stray taps replace the block.
+                        return;
+                    }
 
                     if (this.props.onDoubleClick && instanceId && this.props.enableStructureEditing) {
                         this.props.onDoubleClick(instanceId);
@@ -1065,6 +1100,17 @@ const PedalboardView =
                     throw new PiPedalStateError("scroll container not found.");
                 }
 
+                // Block title / plugin name for the Stage glyph picker. getItem() throws for
+                // ids that are not blocks (chain terminals), hence the guard.
+                private itemName(instanceId: number): string | undefined {
+                    try {
+                        let item = this.state.pedalboard?.getItem(instanceId);
+                        return item ? (item.title || item.pluginName) : undefined;
+                    } catch {
+                        return undefined;
+                    }
+                }
+
                 pedalButton(
                     instanceId: number,
                     iconType: PluginType,
@@ -1108,8 +1154,9 @@ const PedalboardView =
                                     <div id="childIcon" style={{ position: "relative", display: "flex", justifyContent: "center", alignItems: "center" }} >
                                         <PluginIcon pluginType={iconType}
                                             size={24}
-                                            color={getIconColor(iconColor)}
+                                            color={(this.props.theme.stage && !hasBorder) ? "#5a5e66" : getIconColor(iconColor)}
                                             pluginMissing={pluginNotFound}
+                                            hintName={hasBorder ? this.itemName(instanceId) : "__terminal"}
                                         />
                                     </div>
 

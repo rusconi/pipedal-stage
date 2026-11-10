@@ -36,13 +36,16 @@ import Utility from './Utility';
 import MenuItem from '@mui/material/MenuItem';
 import { PiPedalModel, PiPedalModelFactory } from './PiPedalModel';
 import DialIcon from './svg/fx_dial.svg?react';
-import { isDarkMode } from './DarkMode';
+import { isDarkMode, isStageTheme } from './DarkMode';
+import StageKnob, { updateStageKnob, isStageKnob } from './StageKnob';
 
 
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import StopIcon from '@mui/icons-material/Stop';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
 import GraphicEqCtl, { UpdateGraphicEqPath } from './GraphicEqCtl';
+import { subdivisionFor, tempoSyncBinding, setTempoSync, TempoSyncSheet } from './TempoSync';
+import { STAGE } from './StageTheme';
 
 const MIN_ANGLE = -135;
 const MAX_ANGLE = 135;
@@ -59,6 +62,8 @@ enum ButtonStyle { None, Trigger, Momentary, MomentaryOnByDefault }
 
 const SELECTED_OPACITY = 0.8;
 const DEFAULT_OPACITY = 0.6;
+const STAGE_DIAL_RING = 52; // Stage theme: knob outer diameter (track arc)
+const STAGE_DIAL_CAP = 34;  // Stage theme: knob cap diameter
 const RANGE_SCALE = 120; // 120 pixels to move from 0 to 1.
 const FINE_RANGE_SCALE = RANGE_SCALE * 10; // 1200 pixels to move from 0 to 1.
 const ULTRA_FINE_RANGE_SCALE = RANGE_SCALE * 50; // 12000 pixels to move from 0 to 1.
@@ -154,7 +159,9 @@ export type PluginControlState = {
     error: boolean;
     editFocused: boolean;
     previewValue?: string;
+    syncSheetOpen: boolean;   // long-press on a time/rate knob: tempo sync picker
 };
+const LONG_PRESS_MS = 550;
 
 export interface CustomPluginControlProps extends WithStyles<typeof pluginControlStyles> {
     title: string;
@@ -235,8 +242,8 @@ const PluginControl =
                 this.state = {
                     error: false,
                     editFocused: false,
-                    previewValue: undefined
-
+                    previewValue: undefined,
+                    syncSheetOpen: false
                 };
                 this.model = PiPedalModelFactory.getInstance();
                 this.imgRef = React.createRef();
@@ -279,6 +286,7 @@ const PluginControl =
             }
 
             componentWillUnmount() {
+                this.cancelLongPress();
                 this.hideZoomedControl();
             }
             inputChanged: boolean = false;
@@ -450,8 +458,10 @@ const PluginControl =
                     if (this.pointersDown === 1) {
                         this.isTap = true;
                         this.tapStartMs = e.timeStamp;
+                        this.armLongPress();
                     } else {
                         this.isTap = false;
+                        this.cancelLongPress();
                     }
 
                     this.pointerId = e.pointerId;
@@ -597,7 +607,72 @@ const PluginControl =
                 }
             }
 
+            // ---- tempo sync (long-press on a time/rate knob) ----
+            longPressTimer?: number = undefined;
+            canTempoSync(): boolean {
+                let c = this.props.uiControl;
+                return !!c && c.isDial() && c.canDoTapTempo();
+            }
+            armLongPress() {
+                this.cancelLongPress();
+                if (!this.canTempoSync()) return;
+                this.longPressTimer = window.setTimeout(() => {
+                    this.longPressTimer = undefined;
+                    if (this.mouseDown && this.isTap) {
+                        // still resting on the knob: open the picker instead of dragging
+                        this.isTap = false;
+                        let img = this.imgRef.current;
+                        if (img && img.style) img.style.opacity = "" + DEFAULT_OPACITY;
+                        this.mouseDown = false;
+                        this.pointersDown = 0;
+                        this.setState({ previewValue: undefined, syncSheetOpen: true });
+                    }
+                }, LONG_PRESS_MS);
+            }
+            cancelLongPress() {
+                if (this.longPressTimer !== undefined) {
+                    window.clearTimeout(this.longPressTimer);
+                    this.longPressTimer = undefined;
+                }
+            }
+            chooseTempoSync(scale: number | null) {
+                let c = this.props.uiControl;
+                if (c) setTempoSync(this.model, this.props.instanceId, c.symbol, scale);
+                this.setState({ syncSheetOpen: false });
+            }
+            renderSyncSheet(control: UiControl): React.ReactNode {
+                let current = tempoSyncBinding(this.model.pedalboard.get(), this.props.instanceId, control.symbol);
+                return (
+                    <TempoSyncSheet open={this.state.syncSheetOpen} title={control.name + " · Tempo sync"}
+                        currentScale={current ? subdivisionFor(current.rotaryScale).scale : null}
+                        primaryColor={this.props.theme.palette.primary.main}
+                        onChoose={(scale) => this.chooseTempoSync(scale)}
+                        onClose={() => this.setState({ syncSheetOpen: false })} />
+                );
+            }
+            renderSyncChip(control: UiControl): React.ReactNode {
+                if (!this.canTempoSync()) return null;
+                let binding = tempoSyncBinding(this.model.pedalboard.get(), this.props.instanceId, control.symbol);
+                if (!binding) return null;
+                let stage = isStageTheme();
+                let sub = subdivisionFor(binding.rotaryScale);
+                return (
+                    <div className="tempo-sync-chip" title={"Tempo sync: " + sub.name + " (long-press the knob to change)"}
+                        onClick={() => this.setState({ syncSheetOpen: true })}
+                        style={{
+                            display: "inline-block", marginTop: -4, marginBottom: 2, padding: "1px 7px", borderRadius: 999, fontSize: 10.5,
+                            letterSpacing: "0.08em", lineHeight: "16px", cursor: "pointer", userSelect: "none",
+                            color: stage ? STAGE.accent : this.props.theme.palette.primary.main,
+                            border: `1px solid ${stage ? "rgba(245,165,36,0.45)" : this.props.theme.palette.primary.main}`,
+                            fontFamily: stage ? STAGE.displayFont : undefined,
+                        }}>
+                        ♩ {sub.label}
+                    </div>
+                );
+            }
+
             releaseCapture(e: PointerEvent) {
+                this.cancelLongPress();
                 let img = this.imgRef.current;
 
                 if (img && img.style) {
@@ -635,6 +710,7 @@ const PluginControl =
                     let distance = Math.sqrt(dx * dx + dy * dy);
                     if (distance >= this.clickSlop()) {
                         this.isTap = false;
+                        this.cancelLongPress();
                     }
                 }
 
@@ -696,12 +772,17 @@ const PluginControl =
                         }
                     } else {
 
-                        let transform = this.rangeToRotationTransform(range);
-                        if (this.mouseDown && !commitValue) {
-                            transform += " scale(1.5, 1.5)";
-                        }
-                        if (imgElement.style) {
-                            imgElement.style.transform = transform;
+                        if (isStageKnob(imgElement)) {
+                            updateStageKnob(imgElement, range);
+                            imgElement.style.transform = (this.mouseDown && !commitValue) ? "scale(1.25)" : "";
+                        } else {
+                            let transform = this.rangeToRotationTransform(range);
+                            if (this.mouseDown && !commitValue) {
+                                transform += " scale(1.5, 1.5)";
+                            }
+                            if (imgElement.style) {
+                                imgElement.style.transform = transform;
+                            }
                         }
                     }
                 }
@@ -714,13 +795,11 @@ const PluginControl =
 
             }
 
-            modelWeightRing(weights: number[] | undefined, value: number): ReactNode {
+            modelWeightRing(weights: number[] | undefined, value: number, SIZE: number = 46, STROKE_WIDTH: number = 2, style?: React.CSSProperties): ReactNode {
                 if (!weights || weights.length === 0) return null;
                 let uiControl = this.props.uiControl;
                 if (!uiControl) return null;
 
-                const SIZE = 46;
-                const STROKE_WIDTH = 2;
                 let arcs: ReactNode[] = [];
                 let lastValue = 0;
                 for (let i = 0; i < weights.length; ++i) {
@@ -746,7 +825,7 @@ const PluginControl =
                     arcs.push(<path key={i} d={pathData} fill="none" stroke="currentColor" strokeWidth={STROKE_WIDTH} opacity={selected ? 0.66 : 0.2} />);
                 }
                 return (
-                    <svg viewBox={"0 0 " + SIZE + " " + SIZE} style={{ width: SIZE, height: SIZE }}>
+                    <svg viewBox={"0 0 " + SIZE + " " + SIZE} style={{ width: SIZE, height: SIZE, ...style }}>
                         {
                             arcs
                         }
@@ -771,7 +850,9 @@ const PluginControl =
                 } else {
                     let imgElement = this.imgRef.current
                     if (imgElement) {
-                        if (imgElement.style) {
+                        if (isStageKnob(imgElement)) {
+                            updateStageKnob(imgElement, range);
+                        } else if (imgElement.style) {
                             imgElement.style.transform = this.rangeToRotationTransform(range);
                         }
                     }
@@ -826,9 +907,9 @@ const PluginControl =
                     return (
                         <ControlTooltip uiControl={control}>
                             <Switch checked={value !== 0} color="primary"
-                                onChange={(event) => {
-                                    this.onCheckChanged(event.target.checked);
-                                }}
+                                // onClick, not onChange: see MainPage.handleEnableCurrentItemChanged (touch + React 19).
+                                onClick={() => { this.onCheckChanged(value === 0); }}
+                                onChange={() => { }}
                             />
                         </ControlTooltip>
                     );
@@ -839,9 +920,9 @@ const PluginControl =
                     return (
                         <ControlTooltip uiControl={control}>
                             <Switch checked={value !== 0} color="primary"
-                                onChange={(event) => {
-                                    this.onCheckChanged(event.target.checked);
-                                }}
+                                // onClick, not onChange: see MainPage.handleEnableCurrentItemChanged (touch + React 19).
+                                onClick={() => { this.onCheckChanged(value === 0); }}
+                                onChange={() => { }}
                                 classes={{
                                     track: classes.switchTrack
                                 }}
@@ -910,7 +991,8 @@ const PluginControl =
                     return (<div>#Error</div>);
 
                 }
-                let dialColor = this.props.theme.palette.text.primary;
+                let stage = this.props.theme.stage;
+                let dialColor = stage ? "#c9ccd2" : this.props.theme.palette.text.primary;
                 let control: UiControl = t;
                 this.uiControl = control;
                 let value = this.props.value;
@@ -1002,7 +1084,7 @@ const PluginControl =
 
                                                 style={{
                                                     textTransform: "none",
-                                                    background: (isDarkMode() ? "#6750A4" : undefined),
+                                                    background: (isStageTheme() ? undefined : isDarkMode() ? "#6750A4" : undefined),
                                                     marginLeft: 8, marginRight: 8, minWidth: 60,
                                                     marginTop: 0
 
@@ -1040,7 +1122,7 @@ const PluginControl =
 
                                                 style={{
                                                     textTransform: "none",
-                                                    background: (isDarkMode() ? "#6750A4" : undefined),
+                                                    background: (isStageTheme() ? undefined : isDarkMode() ? "#6750A4" : undefined),
                                                     marginLeft: 8, marginRight: 8,
                                                     paddingLeft: 0, paddingRight: 0,
                                                     width: 36, height: 36,
@@ -1081,6 +1163,26 @@ const PluginControl =
                                                 />
                                             </ControlTooltip>
                                         </div>
+                                    ) : (stage && this.props.options?.slimmableWeights && this.props.options.slimmableWeights.length > 0) ? (
+                                        <div style={{ flex: "0 1 auto" }}>
+                                            <ControlTooltip uiControl={control}
+                                                valueTooltip={this.state.previewValue}>
+                                                <div style={{ position: "relative", width: STAGE_DIAL_RING + 10, height: STAGE_DIAL_RING + 10, margin: -5, display: "grid", placeItems: "center" }}>
+                                                    {/* model-size segments as a thin ring just outside the knob's track */}
+                                                    {this.modelWeightRing(this.props.options.slimmableWeights, this.props.value, STAGE_DIAL_RING + 10, 2,
+                                                        { position: "absolute", left: 0, top: 0, color: STAGE.accent, pointerEvents: "none" })}
+                                                    <StageKnob ref={this.imgRef}
+                                                        size={STAGE_DIAL_RING} capSize={STAGE_DIAL_CAP}
+                                                        range={control.valueToRange(value)}
+                                                        accent={this.props.theme.palette.primary.main}
+                                                        onTouchStart={this.onTouchStart} onTouchMove={this.onTouchMove}
+                                                        onPointerDown={this.onPointerDown} onPointerUp={this.onPointerUp}
+                                                        onPointerMove={this.onPointerMove}
+                                                        onDrag={this.onDrag}
+                                                    />
+                                                </div>
+                                            </ControlTooltip>
+                                        </div>
                                     ) : (this.props.options?.slimmableWeights && this.props.options.slimmableWeights.length > 0) ? (
                                         <div style={{ flex: "0 1 auto" }}>
                                             <ControlTooltip uiControl={control}
@@ -1102,6 +1204,21 @@ const PluginControl =
                                                         />
                                                     </div>
                                                 </div>
+                                            </ControlTooltip>
+                                        </div>
+                                    ) : stage ? (
+                                        <div style={{ flex: "0 1 auto" }}>
+                                            <ControlTooltip uiControl={control}
+                                                valueTooltip={this.state.previewValue}>
+                                                <StageKnob ref={this.imgRef}
+                                                    size={STAGE_DIAL_RING} capSize={STAGE_DIAL_CAP}
+                                                    range={control.valueToRange(value)}
+                                                    accent={this.props.theme.palette.primary.main}
+                                                    onTouchStart={this.onTouchStart} onTouchMove={this.onTouchMove}
+                                                    onPointerDown={this.onPointerDown} onPointerUp={this.onPointerUp}
+                                                    onPointerMove={this.onPointerMove}
+                                                    onDrag={this.onDrag}
+                                                />
                                             </ControlTooltip>
                                         </div>
                                     ) : (
@@ -1174,7 +1291,9 @@ const PluginControl =
 
                                                 >
                                                     {this.formatDisplayValue(control, value)}</Typography>
+                                                {this.renderSyncChip(control)}
                                             </div>
+                                            {this.state.syncSheetOpen && this.renderSyncSheet(control)}
                                         </div>
                                     )
                                 )

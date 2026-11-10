@@ -19,7 +19,14 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import React, { SyntheticEvent, Component } from 'react';
+import { STAGE } from './StageTheme';
+import { isStageTheme } from './DarkMode';
 import Switch from "@mui/material/Switch";
+import Slider from "@mui/material/Slider";
+import Select from "@mui/material/Select";
+import MenuItem from "@mui/material/MenuItem";
+import { getIdleDimSettings, setIdleDimSettings, IdleDimSettings } from "./IdleDim";
+import { onScreenKeyboardEnabled } from "./OnScreenKeyboard";
 import ChannelRouterSettings from './ChannelRouterSettings';
 import ChannelRouterSettingsDialog from './ChannelRouterSettingsDialog';
 import OkCancelDialog from './OkCancelDialog';
@@ -74,6 +81,9 @@ interface SettingsDialogProps extends WithStyles<typeof styles> {
 };
 
 interface SettingsDialogState {
+    brightness: number;          // -1 = no backlight
+    brightnessPreview: number;   // slider value while dragging
+    idleDim: IdleDimSettings;
     showStatusMonitor: boolean;
     showStatusMonitorDialog: boolean;
     jackConfiguration: JackConfiguration;
@@ -190,6 +200,7 @@ const SettingsDialog = withStyles(
 
             this.handleDialogClose = this.handleDialogClose.bind(this);
             this.state = {
+            brightness: this.model.brightness.get(), brightnessPreview: this.model.brightness.get(), idleDim: getIdleDimSettings(),
                 showStatusMonitor: this.model.showStatusMonitor.get(),
                 showStatusMonitorDialog: false,
 
@@ -245,6 +256,10 @@ const SettingsDialog = withStyles(
                 screenOrientation: newValue
             });
         }
+        setIdleDim(settings: IdleDimSettings) { setIdleDimSettings(settings); this.setState({ idleDim: settings }); }
+
+        handleBrightnessChanged = (value: number) => { this.setState({ brightness: value, brightnessPreview: value }); };
+
         handleKeepScreenOnChanged(newValue: boolean) {
             this.setState({ keepScreenOn: newValue });
         }
@@ -370,6 +385,7 @@ const SettingsDialog = withStyles(
                 this.active = active;
                 if (active) {
                     this.model.keepScreenOn.addOnChangedHandler(this.handleKeepScreenOnChanged);
+                    this.model.brightness.addOnChangedHandler(this.handleBrightnessChanged);
                     this.model.screenOrientation.addOnChangedHandler(this.handleScreenOrientationChanged);
                     this.model.hasWifiDevice.addOnChangedHandler(this.handleHasWifiChanged);
                     this.model.state.addOnChangedHandler(this.handleConnectionStateChanged);
@@ -414,6 +430,7 @@ const SettingsDialog = withStyles(
                     this.model.state.removeOnChangedHandler(this.handleConnectionStateChanged);
                     this.model.showStatusMonitor.removeOnChangedHandler(this.handleShowStatusMonitorChanged);
                     this.model.keepScreenOn.removeOnChangedHandler(this.handleKeepScreenOnChanged);
+                    this.model.brightness.removeOnChangedHandler(this.handleBrightnessChanged);
                     this.model.screenOrientation.removeOnChangedHandler(this.handleScreenOrientationChanged);
 
                     this.model.jackConfiguration.removeOnChangedHandler(this.handleJackConfigurationChanged);
@@ -666,7 +683,7 @@ const SettingsDialog = withStyles(
                                     )}
 
                                 <div>
-                                    <Typography className={classes.sectionHead} display="block" variant="caption" color="secondary">
+                                    <Typography className={classes.sectionHead} display="block" variant="caption" color={isStageTheme() ? "primary" : "secondary"} style={isStageTheme() ? { fontFamily: STAGE.displayFont, letterSpacing: "0.14em", opacity: 0.85 } : undefined}>
                                         STATUS
                                     </Typography>
                                     {(!isConfigValid) ?
@@ -697,7 +714,7 @@ const SettingsDialog = withStyles(
                                     )
                                 }
                                 <Divider />
-                                <Typography className={classes.sectionHead} display="block" variant="caption" color="secondary">
+                                <Typography className={classes.sectionHead} display="block" variant="caption" color={isStageTheme() ? "primary" : "secondary"} style={isStageTheme() ? { fontFamily: STAGE.displayFont, letterSpacing: "0.14em", opacity: 0.85 } : undefined}>
                                     AUDIO
                                 </Typography>
                                 <ButtonBase className={classes.setting} onClick={() => this.handleJackServerSettings()}
@@ -780,7 +797,7 @@ const SettingsDialog = withStyles(
                                     */}
                                 <Divider />
                                 <div >
-                                    <Typography className={classes.sectionHead} display="block" variant="caption" color="secondary">MIDI</Typography>
+                                    <Typography className={classes.sectionHead} display="block" variant="caption" color={isStageTheme() ? "primary" : "secondary"} style={isStageTheme() ? { fontFamily: STAGE.displayFont, letterSpacing: "0.14em", opacity: 0.85 } : undefined}>MIDI</Typography>
                                     <ButtonBase className={classes.setting} disabled={!isConfigValid} onClick={() => this.handleMidiSelection()}  >
                                         <SelectHoverBackground selected={false} showHover={true} />
                                         <div style={{ width: "100%" }}>
@@ -805,7 +822,7 @@ const SettingsDialog = withStyles(
                             {(!this.props.onboarding) &&
                                 (
                                     <div>
-                                        <Typography className={classes.sectionHead} display="block" variant="caption" color="secondary">
+                                        <Typography className={classes.sectionHead} display="block" variant="caption" color={isStageTheme() ? "primary" : "secondary"} style={isStageTheme() ? { fontFamily: STAGE.displayFont, letterSpacing: "0.14em", opacity: 0.85 } : undefined}>
                                             DISPLAY
                                         </Typography>
                                         <ButtonBase
@@ -817,10 +834,52 @@ const SettingsDialog = withStyles(
                                                     Color theme</Typography>
                                                 <Typography className={classes.secondaryItem} display="block" variant="caption" color="textSecondary" noWrap>
                                                     {this.model.getTheme() === ColorTheme.Dark ? "Dark" :
-                                                        (this.model.getTheme() === ColorTheme.Light ? "Light" : "System")}
+                                                        this.model.getTheme() === ColorTheme.Light ? "Light" :
+                                                            this.model.getTheme() === ColorTheme.Stage ? "Stage" : "System"}
                                                 </Typography>
                                             </div>
                                         </ButtonBase>
+                                        {this.state.brightness >= 0 && (
+                                            <div className={classes.setting} style={{ display: "block" }}>
+                                                <div style={{ width: "100%", maxWidth: 400, display: "flex", flexDirection: "row", alignItems: "center", gap: 16 }}>
+                                                    <div style={{ flex: "0 0 auto", minWidth: 120 }}>
+                                                        <Typography className={classes.primaryItem} display="block" variant="body2" color="textPrimary" noWrap>Brightness</Typography>
+                                                        <Typography className={classes.secondaryItem} display="block" variant="caption" color="textSecondary" noWrap>{this.state.brightnessPreview}%</Typography>
+                                                    </div>
+                                                    <Slider className="brightness-slider" style={{ flex: "1 1 auto" }} min={5} max={100} step={5}
+                                                        value={this.state.brightnessPreview}
+                                                        onChange={(_e, v) => { let p = v as number; this.setState({ brightnessPreview: p }); this.model.setTemporaryBrightness(p); }}
+                                                        onChangeCommitted={(_e, v) => { this.model.setBrightness(v as number); }} />
+                                                </div>
+                                            </div>
+                                        )}
+                                        {this.state.brightness >= 0 && onScreenKeyboardEnabled() && (
+                                            <div className={classes.setting} style={{ display: "block" }}>
+                                                <div style={{ width: "100%", maxWidth: 400, display: "flex", flexDirection: "row", alignItems: "center", gap: 12 }}>
+                                                    <div style={{ flex: "1 1 auto" }}>
+                                                        <Typography className={classes.primaryItem} display="block" variant="body2" color="textPrimary" noWrap>Dim when idle</Typography>
+                                                        <Typography className={classes.secondaryItem} display="block" variant="caption" color="textSecondary" noWrap>
+                                                            {this.state.idleDim.enabled ? `after ${this.state.idleDim.minutes} min, to ${this.state.idleDim.level}%` : "off"}
+                                                        </Typography>
+                                                    </div>
+                                                    {this.state.idleDim.enabled && (
+                                                        <Select variant="standard" value={this.state.idleDim.minutes}
+                                                            onChange={(e) => this.setIdleDim({ ...this.state.idleDim, minutes: Number(e.target.value) })}>
+                                                            {[1, 2, 5, 10, 30].map((m) => <MenuItem key={m} value={m}>{m} min</MenuItem>)}
+                                                        </Select>
+                                                    )}
+                                                    {this.state.idleDim.enabled && (
+                                                        <Select variant="standard" value={this.state.idleDim.level}
+                                                            onChange={(e) => this.setIdleDim({ ...this.state.idleDim, level: Number(e.target.value) })}>
+                                                            {[5, 10, 25, 50].map((l) => <MenuItem key={l} value={l}>{l}%</MenuItem>)}
+                                                        </Select>
+                                                    )}
+                                                    <Switch checked={this.state.idleDim.enabled}
+                                                        onClick={() => this.setIdleDim({ ...this.state.idleDim, enabled: !this.state.idleDim.enabled })}
+                                                        onChange={() => { }} />
+                                                </div>
+                                            </div>
+                                        )}
                                         {canKeepScreenOn &&
                                             (
                                                 <ButtonBase
@@ -842,9 +901,8 @@ const SettingsDialog = withStyles(
                                                             <div style={{ flex: "0 0 auto" }}>
                                                                 <Switch
                                                                     checked={this.state.keepScreenOn}
-                                                                    onChange={
-                                                                        (e) => { this.model.setKeepScreenOn(e.target.checked); }
-                                                                    }
+                                                                    onClick={() => { this.model.setKeepScreenOn(!this.state.keepScreenOn); }}
+                                                                    onChange={() => { }}
                                                                 />
                                                             </div>
 
@@ -905,9 +963,8 @@ const SettingsDialog = withStyles(
                                                     <div style={{ flex: "0 0 auto" }}>
                                                         <Switch
                                                             checked={this.state.showStatusMonitor}
-                                                            onChange={
-                                                                (e) => { this.model.setShowStatusMonitor(e.target.checked); }
-                                                            }
+                                                            onClick={() => { this.model.setShowStatusMonitor(!this.state.showStatusMonitor); }}
+                                                            onChange={() => { }}
                                                         />
                                                     </div>
 
@@ -924,7 +981,7 @@ const SettingsDialog = withStyles(
                                     <div>
                                         <Divider />
                                         <div >
-                                            <Typography className={classes.sectionHead} display="block" variant="caption" color="secondary">CONNECTION</Typography>
+                                            <Typography className={classes.sectionHead} display="block" variant="caption" color={isStageTheme() ? "primary" : "secondary"} style={isStageTheme() ? { fontFamily: STAGE.displayFont, letterSpacing: "0.14em", opacity: 0.85 } : undefined}>CONNECTION</Typography>
 
                                             {this.state.hasWifiDevice && (
                                                 <ButtonBase
@@ -968,7 +1025,7 @@ const SettingsDialog = withStyles(
                             {(!this.props.onboarding) ? (
                                 <div >
                                     <Divider />
-                                    <Typography className={classes.sectionHead} display="block" variant="caption" color="secondary">SYSTEM</Typography>
+                                    <Typography className={classes.sectionHead} display="block" variant="caption" color={isStageTheme() ? "primary" : "secondary"} style={isStageTheme() ? { fontFamily: STAGE.displayFont, letterSpacing: "0.14em", opacity: 0.85 } : undefined}>SYSTEM</Typography>
 
                                     {
                                         this.model.enableAutoUpdate && (

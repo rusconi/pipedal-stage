@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #pragma once
+#include <chrono>
 #include <mutex>
 #include "UpdaterStatus.hpp"
 #include "PluginHost.hpp"
@@ -72,6 +73,13 @@ namespace pipedal
         virtual void OnVst3ControlChanged(int64_t clientId, int64_t pedalItemId, const std::string &symbol, float value, const std::string &state) = 0;
         virtual void OnPedalboardChanged(int64_t clientId, const Pedalboard &pedalboard) = 0;
         virtual void OnPresetsChanged(int64_t clientId, const PresetIndex &presets) = 0;
+        virtual void OnPresetPageChanged(int64_t page) = 0;
+        virtual void OnTempoChanged(double bpm) = 0; // rig: global tap tempo
+        virtual void OnBrightnessChanged(int32_t percent) = 0; // rig: display backlight, 0-100 (-1 = no backlight)
+        // rig: tempo-sync picker driven from the pedal encoder. kind: 0 = open/cancel (hold),
+        // 1 = step (delta = signed steps), 2 = confirm (push). Only sent while the UI reports the picker open,
+        // except kind 0 which always goes out.
+        virtual void OnTempoPickerEvent(int32_t kind, int32_t delta) = 0;
         virtual void OnPresetChanged(bool changed) = 0;
         virtual void OnSnapshotModified(int64_t selectedSnapshot, bool modified) = 0;
         virtual void OnSelectedSnapshotChanged(int64_t selectedSnapshot) = 0;
@@ -312,6 +320,15 @@ namespace pipedal
         void PreviousBank() { NextBank(Direction::Decrease); }
         void NextPreset(Direction direction = Direction::Increase);
         void PreviousPreset() { NextPreset(Direction::Decrease); }
+
+        // Preset paging (rig feature): the MIDI controller's four preset switches address
+        // PRESET_PAGE_SIZE presets at a time; its UP/DOWN switches (nextProgram/prevProgram
+        // bindings) and the UI's pager move the page. Loading a preset that is off-page
+        // moves the page to it. Shared by the pedal (via MidiFeedbackController) and the UI.
+        static constexpr int64_t PRESET_PAGE_SIZE = 4;
+        int64_t GetPresetPage();
+        void SetPresetPage(int64_t page);
+        void NextPresetPage(Direction direction = Direction::Increase);
         void NextSnapshot(Direction direction = Direction::Increase);
         void PreviousSnapshot() { NextSnapshot(Direction::Decrease); }
 
@@ -441,6 +458,42 @@ namespace pipedal
 
         std::vector<AlsaSequencerPortSelection> GetAlsaSequencerPorts();
 
+        void SelectDefaultSnapshot();
+        void ToggleTunerMute();
+        // Global tap tempo (rig). Tempo is pushed to every port of the current preset that
+        // has a stock "Tap Tempo" MIDI binding (units-aware), so the flag and the value
+        // both live in stock preset data.
+        double GetTempo();
+        void SetTempo(double bpm);
+        void TapTempo();
+        void NudgeTempo(int steps);
+        void RefreshTempoFromPedalboard(); // derive tempo from the first tempo-bound port
+        double tempo_ = 120.0;
+        std::vector<std::chrono::steady_clock::time_point> tapTimes_;
+        void ApplyTempo(double bpm);
+        void FireTempoChanged(double bpm);
+        // Tuner mode without a tuner block: a TooB Tuner is inserted at the chain start on
+        // entry and removed again on exit. The preset's modified state is left untouched.
+        int64_t autoTunerInstanceId_ = -1;
+        bool suppressPresetChanged_ = false;
+        void InsertAutoTuner();
+        void RemoveAutoTuner();
+        bool tempoPickerOpen_ = false; // reported by the UI (setTempoPickerOpen)
+        // rig: display backlight (/sys/class/backlight/*). Percent persisted in <data>/config/brightness
+        // and re-applied at startup; temporary values (idle dim) are not persisted.
+        std::string backlightPath_;
+        int32_t backlightMax_ = 0;
+        int32_t brightness_ = -1;
+        void InitBacklight();
+        int32_t GetBrightness();
+        void SetBrightness(int32_t percent, bool persist);
+        void FireBrightnessChanged(int32_t percent);
+        void SetTempoPickerOpen(bool open);
+        void FireTempoPickerEvent(int32_t kind, int32_t delta);
+        int64_t presetPage_ = 0;
+        int64_t PageOfPreset(int64_t instanceId);
+        int64_t PresetPageCount();
+        void FirePresetPageChanged(int64_t page);
         void SetShowStatusMonitor(bool show);
         bool GetShowStatusMonitor();
 

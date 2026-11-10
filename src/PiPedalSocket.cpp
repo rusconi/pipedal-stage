@@ -1747,6 +1747,70 @@ public:
     }
     REGISTER_MESSAGE_HANDLER(previousBank)
 
+    void handle_getPresetPage(int replyTo, json_reader *pReader)
+    {
+        Reply(replyTo, "getPresetPage", this->model.GetPresetPage());
+    }
+    REGISTER_MESSAGE_HANDLER(getPresetPage)
+
+    void handle_setPresetPage(int replyTo, json_reader *pReader)
+    {
+        int64_t page = 0;
+        pReader->read(&page);
+        this->model.SetPresetPage(page);
+    }
+    REGISTER_MESSAGE_HANDLER(setPresetPage)
+
+    void handle_getTempo(int replyTo, json_reader *pReader)
+    {
+        Reply(replyTo, "getTempo", this->model.GetTempo());
+    }
+    REGISTER_MESSAGE_HANDLER(getTempo)
+
+    void handle_setTempo(int replyTo, json_reader *pReader)
+    {
+        double bpm = 0;
+        pReader->read(&bpm);
+        this->model.SetTempo(bpm);
+    }
+    REGISTER_MESSAGE_HANDLER(setTempo)
+
+    void handle_tapTempo(int replyTo, json_reader *pReader)
+    {
+        this->model.TapTempo();
+    }
+    REGISTER_MESSAGE_HANDLER(tapTempo)
+
+    void handle_setTempoPickerOpen(int replyTo, json_reader *pReader)
+    {
+        bool open = false;
+        pReader->read(&open);
+        this->model.SetTempoPickerOpen(open);
+    }
+    REGISTER_MESSAGE_HANDLER(setTempoPickerOpen)
+
+    void handle_getBrightness(int replyTo, json_reader *pReader)
+    {
+        Reply(replyTo, "getBrightness", this->model.GetBrightness());
+    }
+    REGISTER_MESSAGE_HANDLER(getBrightness)
+
+    void handle_setBrightness(int replyTo, json_reader *pReader)
+    {
+        int32_t percent = 0;
+        pReader->read(&percent);
+        this->model.SetBrightness(percent, true);
+    }
+    REGISTER_MESSAGE_HANDLER(setBrightness)
+
+    void handle_setTemporaryBrightness(int replyTo, json_reader *pReader)
+    {
+        int32_t percent = 0;
+        pReader->read(&percent);
+        this->model.SetBrightness(percent, false);
+    }
+    REGISTER_MESSAGE_HANDLER(setTemporaryBrightness)
+
     void handle_nextPreset(int replyTo, json_reader *pReader)
     {
         model.NextPreset();
@@ -2357,6 +2421,23 @@ private:
     virtual void OnShowStatusMonitorChanged(bool show)
     {
         Send("onShowStatusMonitorChanged", show);
+    }
+    virtual void OnPresetPageChanged(int64_t page)
+    {
+        Send("onPresetPageChanged", page);
+    }
+    virtual void OnTempoChanged(double bpm)
+    {
+        Send("onTempoChanged", bpm);
+    }
+    virtual void OnTempoPickerEvent(int32_t kind, int32_t delta)
+    {
+        std::vector<int32_t> body{kind, delta};
+        Send("onTempoPickerEvent", body);
+    }
+    virtual void OnBrightnessChanged(int32_t percent)
+    {
+        Send("onBrightnessChanged", percent);
     }
 
     virtual void OnChannelRouterSettingsChanged(int64_t clientId, const ChannelRouterSettings &channelRouterSettings)

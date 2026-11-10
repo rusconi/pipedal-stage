@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import { SyntheticEvent } from 'react';
+import { Save as LucideSave, EllipsisVertical as LucideEllipsisVertical, ChevronDown as LucideChevronDown } from 'lucide-react';
 import ArrowRightIcon from '@mui/icons-material/ArrowRight';
 import IconButtonEx from './IconButtonEx';
 import { PiPedalModel, PiPedalModelFactory, PresetIndex } from './PiPedalModel';
@@ -39,7 +40,7 @@ import ImportPresetFromBankDialog from './ImportPresetFromBankDialog';
 
 import Select from '@mui/material/Select';
 import UploadPresetDialog from './UploadPresetDialog';
-import { isDarkMode } from './DarkMode';
+import { isDarkMode, isStageTheme } from './DarkMode';
 import ResizeResponsiveComponent from './ResizeResponsiveComponent';
 
 interface PresetSelectorProps extends WithStyles<typeof styles> {
@@ -71,10 +72,19 @@ interface PresetSelectorState {
 
 const selectColor = isDarkMode() ? "#888" : "#FFFFFF";
 
+// MUI Select arrow replacement (Stage): keeps MUI's positioning class, draws a thin chevron.
+function StageChevron(props: { className?: string }) {
+    return <LucideChevronDown className={props.className} size={22} strokeWidth={1.75} style={{ color: "#f2f2f2", opacity: 0.8, top: "calc(50% - 11px)" }} />;
+}
+
 const styles = (theme: Theme) => createStyles({
     select: { // fu fu fu.Overrides for white selector on dark background.
+        // Stage theme: the preset name is the headline of the screen.
+        fontFamily: theme.stage ? "'Nexa', 'Roboto', sans-serif" : undefined,
+        fontSize: theme.stage ? 23 : undefined,
+        letterSpacing: theme.stage ? "0.03em" : undefined,
         '&:before': {
-            borderColor: selectColor,
+            borderColor: theme.stage ? theme.palette.divider : selectColor,
         },
         '&:after': {
             borderColor: selectColor,
@@ -351,18 +361,22 @@ const PresetSelector =
                         marginLeft: 12, display: "flex", flexDirection: "row",
                         justifyContent: "left", flexWrap: "nowrap", alignItems: "center", height: "100%", position: "relative"
                     }}>
-                        <div style={{ flex: "0 0 auto" }}>
-                            <IconButtonEx tooltip="Save current preset"
-                                style={{ flex: "0 0 auto", color: "#FFFFFF" }}
-                                onClick={(e) => { this.handleSave(); }}
-                                size="large">
-                                <SaveIconOutline style={{ opacity: 0.75 }} color="inherit" />
-                            </IconButtonEx>
-                        </div>
+                        {(!isStageTheme() || presets.presetChanged) && (
+                            // Stage: the save icon only appears while there is something to save.
+                            <div style={{ flex: "0 0 auto" }}>
+                                <IconButtonEx tooltip="Save current preset"
+                                    style={{ flex: "0 0 auto", color: "#FFFFFF" }}
+                                    onClick={(e) => { this.handleSave(); }}
+                                    size="large">
+                                    {isStageTheme() ? <LucideSave size={22} strokeWidth={1.75} style={{ opacity: 0.85 }} /> : <SaveIconOutline style={{ opacity: 0.75 }} color="inherit" />}
+                                </IconButtonEx>
+                            </div>
+                        )}
 
                         <div style={{ flex: "1 1 auto", minWidth: 60, maxWidth: 300, position: "relative", paddingRight: 12 }} >
                             <Select variant="standard"
                                 className={classes.select}
+                                IconComponent={isStageTheme() ? StageChevron : undefined}
                                 style={{ width: "100%", position: "relative", top: 0, color: "#FFFFFF" }} disabled={!this.state.enabled}
                                 onChange={(e, extra) => this.handleChange(e, extra)}
                                 onClose={(e) => this.handleSelectClose(e)}
@@ -379,7 +393,9 @@ const PresetSelector =
                                         return (
                                             <MenuItem key={preset.instanceId} value={preset.instanceId} >
                                                 {(presets.presetChanged && preset.instanceId === presets.selectedInstanceId)
-                                                    ? (preset.name + "*")
+                                                    ? (isStageTheme()
+                                                        ? <span style={{ fontStyle: "italic" }}>{preset.name}</span> // Stage: italic = unsaved (QC convention)
+                                                        : preset.name + "*")
                                                     : (preset.name)
                                                 }
                                             </MenuItem>
@@ -395,7 +411,7 @@ const PresetSelector =
                                 onClick={(e) => this.handlePresetsMenuClick(e)}
                                 size="large"
                             >
-                                <MoreVertIcon style={{ opacity: 0.75 }} color="inherit" />
+                                {isStageTheme() ? <LucideEllipsisVertical size={22} strokeWidth={1.75} style={{ opacity: 0.85 }} /> : <MoreVertIcon style={{ opacity: 0.75 }} color="inherit" />}
                             </IconButtonEx>
                             <Menu
                                 id="edit-presets-menu"

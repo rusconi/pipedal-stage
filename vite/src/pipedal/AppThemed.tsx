@@ -19,6 +19,8 @@
 
 
 import './AppThemed.css';
+import { Menu as LucideMenu, AudioLines as LucideAudioLines, Pencil as LucidePencil, Copy as LucideCopy, FolderCog as LucideFolderCog, Settings as LucideSettings, CircleHelp as LucideCircleHelp, Heart as LucideHeart } from 'lucide-react';
+import OnScreenKeyboard, { onScreenKeyboardEnabled } from './OnScreenKeyboard';
 
 //import {alpha} from '@mui/material/styles';
 import AppBar from '@mui/material/AppBar';
@@ -64,7 +66,7 @@ import { BankIndex, BankIndexEntry } from './Banks';
 import RenameDialog from './RenameDialog';
 import JackStatusView from './JackStatusView';
 import { type Theme } from '@mui/material/styles';
-import { isDarkMode } from './DarkMode';
+import { isDarkMode, isStageTheme } from './DarkMode';
 import UpdateDialog from './UpdateDialog';
 
 import RenameOutlineIcon from './svg/drive_file_rename_outline_black_24dp.svg?react';
@@ -361,7 +363,7 @@ export
             isDrawerOpen: false,
             errorMessage: this.model_.errorMessage.get(),
             displayState: this.model_.state.get(),
-            canFullScreen: supportsFullScreen() && !this.model_.isAndroidHosted(),
+            canFullScreen: supportsFullScreen() && !this.model_.isAndroidHosted() && !onScreenKeyboardEnabled(),
             isFullScreen: !!document.fullscreenElement,
             tinyToolBar: false,
             alertDialogOpen: false,
@@ -707,7 +709,7 @@ export
 
         this.setState({
             displayState: newState,
-            canFullScreen: supportsFullScreen() && !this.model_.isAndroidHosted()
+            canFullScreen: supportsFullScreen() && !this.model_.isAndroidHosted() && !onScreenKeyboardEnabled()
         });
         if (newState === State.Ready) {
             if (this.model_.isOnboarding()) {
@@ -798,6 +800,7 @@ export
                     }
                 }}
             >
+                {onScreenKeyboardEnabled() && (<OnScreenKeyboard />)}
                 {this.state.performanceView ? (
                     <PerformanceView open={this.state.performanceView}
                         onClose={() => { this.setState({ performanceView: false }); }}
@@ -820,7 +823,7 @@ export
                                             color="inherit"
                                             onClick={() => { this.showDrawer() }}
                                             size="large">
-                                            <MenuButton style={{ opacity: 0.75 }} />
+                                            {isStageTheme() ? <LucideMenu size={24} strokeWidth={1.75} style={{ opacity: 0.85 }} /> : <MenuButton style={{ opacity: 0.75 }} />}
                                         </IconButtonEx>
                                         <div style={{ flex: "0 1 400px", minWidth: 100 }}>
                                             <PresetSelector />
@@ -886,7 +889,7 @@ export
                                         this.setState({ performanceView: true });
                                     }}>
                                     <ListItemIcon >
-                                        <FxAmplifierIcon color='inherit' className={classes.menuIcon} style={{ width: 24, height: 24 }} />
+                                        {isStageTheme() ? <LucideAudioLines size={22} strokeWidth={1.75} /> : <FxAmplifierIcon color='inherit' className={classes.menuIcon} style={{ width: 24, height: 24 }} />}
                                     </ListItemIcon>
                                     <ListItemText primary='Performance View' />
                                 </ListItemButton>
@@ -941,7 +944,7 @@ export
                                         this.handleDrawerRenameBank()
                                     }}>
                                     <ListItemIcon >
-                                        <RenameOutlineIcon color='inherit' className={classes.menuIcon} />
+                                        {isStageTheme() ? <LucidePencil size={22} strokeWidth={1.75} /> : <RenameOutlineIcon color='inherit' className={classes.menuIcon} />}
                                     </ListItemIcon>
                                     <ListItemText primary='Rename bank' />
                                 </ListItemButton>
@@ -952,7 +955,7 @@ export
                                         this.handleDrawerSaveBankAs();
                                     }} >
                                     <ListItemIcon>
-                                        <SaveBankAsIcon color="inherit" className={classes.menuIcon} />
+                                        {isStageTheme() ? <LucideCopy size={22} strokeWidth={1.75} /> : <SaveBankAsIcon color="inherit" className={classes.menuIcon} />}
                                     </ListItemIcon>
                                     <ListItemText primary='Save as new bank' />
                                 </ListItemButton>
@@ -963,7 +966,7 @@ export
                                         this.handleDrawerManageBanks();
                                     }}>
                                     <ListItemIcon>
-                                        <EditBanksIcon color="inherit" className={classes.menuIcon} />
+                                        {isStageTheme() ? <LucideFolderCog size={22} strokeWidth={1.75} /> : <EditBanksIcon color="inherit" className={classes.menuIcon} />}
                                     </ListItemIcon>
                                     <ListItemText primary='Manage banks...' />
                                 </ListItemButton>
@@ -977,7 +980,7 @@ export
                                         this.handleDrawerSettingsClick()
                                     }}>
                                     <ListItemIcon>
-                                        <SettingsIcon color="inherit" className={classes.menuIcon} />
+                                        {isStageTheme() ? <LucideSettings size={22} strokeWidth={1.75} /> : <SettingsIcon color="inherit" className={classes.menuIcon} />}
                                     </ListItemIcon>
                                     <ListItemText primary='Settings' />
                                 </ListItemButton>
@@ -988,7 +991,7 @@ export
                                         this.handleDrawerAboutClick();
                                     }}>
                                     <ListItemIcon>
-                                        <HelpOutlineIcon color="inherit" className={classes.menuIcon} />
+                                        {isStageTheme() ? <LucideCircleHelp size={22} strokeWidth={1.75} /> : <HelpOutlineIcon color="inherit" className={classes.menuIcon} />}
                                     </ListItemIcon>
                                     <ListItemText primary='About' />
                                 </ListItemButton>
@@ -998,7 +1001,7 @@ export
                                         this.handleDrawerDonationClick();
                                     }}>
                                     <ListItemIcon >
-                                        <VolunteerActivismIcon className={classes.menuIcon} color="inherit" />
+                                        {isStageTheme() ? <LucideHeart size={22} strokeWidth={1.75} /> : <VolunteerActivismIcon className={classes.menuIcon} color="inherit" />}
                                     </ListItemIcon>
                                     <ListItemText primary='Sponsorship' />
                                 </ListItemButton>
@@ -1119,7 +1122,7 @@ export
                             bottom: "0px",
                             opacity: 0.8,
                             background:
-                                isDarkMode() ? "#222" : "#EEE",
+                                isStageTheme() ? "#17181b" : isDarkMode() ? "#222" : "#EEE",
                         }} />
                         <div style={{ flex: "2 2 3px", height: 20 }} >&nbsp;</div>
                         <div className={classes.errorMessageBox} style={{ position: "relative" }} >
@@ -1159,7 +1162,7 @@ export
                             bottom: "0px",
                             opacity: 0.8,
                             background:
-                                isDarkMode() ? "#222" : "#EEE",
+                                isStageTheme() ? "#17181b" : isDarkMode() ? "#222" : "#EEE",
 
                         }} />
                         <div className={classes.loadingBox}>

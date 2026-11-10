@@ -18,6 +18,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import { UiPlugin, UiControl, PluginType, UiFileProperty } from './Lv2Plugin';
+import { onScreenKeyboardEnabled } from './OnScreenKeyboard';
 
 import { PiPedalArgumentError, PiPedalStateError } from './PiPedalError';
 import { UpdateStatus, UpdatePolicyT } from './Updater';
@@ -574,9 +575,19 @@ export class PiPedalModel //implements PiPedalModel
 
     showStatusMonitor: ObservableProperty<boolean> = new ObservableProperty<boolean>(true);
 
+
     pedalboard: ObservableProperty<Pedalboard> = new ObservableProperty<Pedalboard>(new Pedalboard());
     presetChanged: ObservableProperty<boolean> = new ObservableProperty<boolean>(false);
     selectedSnapshot: ObservableProperty<number> = new ObservableProperty<number>(-1);
+    // Preset page shared with the MIDI controller (4 presets per page; see PiPedalModel::SetPresetPage).
+    presetPage: ObservableProperty<number> = new ObservableProperty<number>(0);
+    // Global tap tempo (rig): BPM pushed to every tempo-bound port. 0 = daemon without tempo support.
+    tempo: ObservableProperty<number> = new ObservableProperty<number>(0);
+    tempoTapCount: ObservableProperty<number> = new ObservableProperty<number>(0); // bumps on every tap, incl. the first (un-timed) one
+    // Pedal-driven tempo-sync picker: kind 0 = open/cancel (encoder hold), 1 = step (delta), 2 = confirm (push).
+    tempoPickerEvent: ObservableProperty<{ seq: number; kind: number; delta: number }> = new ObservableProperty({ seq: 0, kind: -1, delta: 0 });
+    // Display backlight percent (persisted on the server). -1 = no backlight / stock daemon.
+    brightness: ObservableProperty<number> = new ObservableProperty<number>(-1);
     plugin_classes: ObservableProperty<PluginClass> = new ObservableProperty<PluginClass>(new PluginClass());
     jackConfiguration: ObservableProperty<JackConfiguration> = new ObservableProperty<JackConfiguration>(new JackConfiguration());
     jackSettings: ObservableProperty<JackChannelSelection> = new ObservableProperty<JackChannelSelection>(new JackChannelSelection());
@@ -907,6 +918,17 @@ export class PiPedalModel //implements PiPedalModel
                     }
                 }
             }
+        } else if (message === "onPresetPageChanged") {
+            this.presetPage.set(body as number);
+        } else if (message === "onTempoChanged") {
+            let bpm = body as number; // negative = first tap of a sequence, tempo unchanged
+            if (bpm > 0) this.tempo.set(bpm);
+            this.tempoTapCount.set(this.tempoTapCount.get() + 1);
+        } else if (message === "onBrightnessChanged") {
+            this.brightness.set(body as number);
+        } else if (message === "onTempoPickerEvent") {
+            let b = body as number[];
+            this.tempoPickerEvent.set({ seq: this.tempoPickerEvent.get().seq + 1, kind: b[0], delta: b[1] });
         } else if (message === "onSelectedSnapshotChanged") {
             let selectedSnapshot = body as number;
             this.pedalboard.get().selectedSnapshot = selectedSnapshot;
@@ -1114,6 +1136,9 @@ export class PiPedalModel //implements PiPedalModel
         if (updateStatus.updatePolicy === UpdatePolicyT.Disable) {
             canUpdateNow = false;
         }
+        if (updateStatus.customBuildTag !== "") {
+            canUpdateNow = false; // custom build: install is disabled, nothing to prompt for.
+        }
 
         if (canUpdateNow && canUpdateNow !== this.lastCanUpdateNow) {
             this.showUpdateDialogValue = true; // make the dialog sticky so it can show OK button
@@ -1185,6 +1210,27 @@ export class PiPedalModel //implements PiPedalModel
     setError(message: string): void {
         this.errorMessage.set(message);
         this.setState(State.Error);
+        if (message !== "") {
+            this.startKioskRecovery(); // setError("") is used to clear errors: not a lost connection
+        }
+    }
+
+    // Kiosk (localhost / ?vkb=1): nobody is there to tap RELOAD after the socket's
+    // retries give up (e.g. pipedald restarted a few times in a row). Poll the server
+    // and reload the page as soon as it answers.
+    private kioskRecoveryTimer?: number;
+    private startKioskRecovery(): void {
+        if (!onScreenKeyboardEnabled() || this.kioskRecoveryTimer !== undefined) return;
+        this.kioskRecoveryTimer = window.setInterval(async () => {
+            try {
+                let r = await fetch("/", { cache: "no-store" });
+                if (r.ok) {
+                    window.clearInterval(this.kioskRecoveryTimer);
+                    this.kioskRecoveryTimer = undefined;
+                    this.reloadPage();
+                }
+            } catch { /* server still down; keep polling */ }
+        }, 3000);
     }
     varRequest(url: string): string {
         return "var/" + url;
@@ -1193,6 +1239,10 @@ export class PiPedalModel //implements PiPedalModel
     private setState(state: State) {
         if (this.state.get() !== state) {
             this.state.set(state);
+            if (state === State.Ready && this.kioskRecoveryTimer !== undefined) {
+                window.clearInterval(this.kioskRecoveryTimer); // connection came back on its own
+                this.kioskRecoveryTimer = undefined;
+            }
             if (state === State.Error) {
                 this.closeTone3000DownloadPopup();
             }
@@ -1504,6 +1554,21 @@ export class PiPedalModel //implements PiPedalModel
             this.showStatusMonitor.set(
                 await this.getWebSocket().request<boolean>("getShowStatusMonitor")
             );
+            try {
+                this.presetPage.set(await this.getWebSocket().request<number>("getPresetPage"));
+            } catch {
+                this.presetPage.set(0); // stock daemon: no paging
+            }
+            try {
+                this.tempo.set(await this.getWebSocket().request<number>("getTempo"));
+            } catch {
+                this.tempo.set(0); // stock daemon: no global tempo
+            }
+            try {
+                this.brightness.set(await this.getWebSocket().request<number>("getBrightness"));
+            } catch {
+                this.brightness.set(-1); // stock daemon / no backlight
+            }
             this.jackServerSettings.set(
                 new JackServerSettings().deserialize(
                     await this.getWebSocket().request<any>("getJackServerSettings")
@@ -1794,6 +1859,24 @@ export class PiPedalModel //implements PiPedalModel
     }
     nextPreset() {
         this.webSocket?.send("nextPreset");
+    }
+    setPresetPage(page: number) {
+        this.webSocket?.send("setPresetPage", page);
+    }
+    tapTempo() {
+        this.webSocket?.send("tapTempo", true);
+    }
+    setTempo(bpm: number) {
+        this.webSocket?.send("setTempo", bpm);
+    }
+    setTempoPickerOpen(open: boolean) {
+        this.webSocket?.send("setTempoPickerOpen", open);
+    }
+    setBrightness(percent: number) {
+        this.webSocket?.send("setBrightness", Math.round(percent));
+    }
+    setTemporaryBrightness(percent: number) {   // idle dim: not persisted
+        this.webSocket?.send("setTemporaryBrightness", Math.round(percent));
     }
     previousPreset() {
         this.webSocket?.send("previousPreset");
@@ -3652,7 +3735,19 @@ export class PiPedalModel //implements PiPedalModel
     }
 
 
+    // The kiosk must stay on the localhost origin: theme/keyboard state live in that
+    // origin's localStorage and Stage/OSK are keyed on it. Any reload or reconnect
+    // navigation goes back to the kiosk URL.
+    static readonly KIOSK_URL = "http://localhost/?vkb=1";
+    private kioskUrlOr(url: string): string {
+        return onScreenKeyboardEnabled() ? PiPedalModel.KIOSK_URL : url;
+    }
+
     reloadPage() {
+        if (onScreenKeyboardEnabled()) {
+            window.location.replace(PiPedalModel.KIOSK_URL);
+            return;
+        }
         // eslint-disable-next-line no-restricted-globals
         let url = window.location.href.split('#')[0];
         window.location.href = url;
@@ -3708,7 +3803,7 @@ export class PiPedalModel //implements PiPedalModel
                     this.startHotspotReconnectTimer();
                 } else {
                     this.cancelOnNetworkChanging();
-                    window.location.replace(newUrl);
+                    window.location.replace(this.kioskUrlOr(newUrl)); // kiosk: never leave localhost
                 }
             },
             5 * 1000);

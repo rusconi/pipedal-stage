@@ -24,7 +24,7 @@ import CssBaseline from '@mui/material/CssBaseline';
 
 import VirtualKeyboardHandler from './VirtualKeyboardHandler';
 import AppThemed from "./AppThemed";
-import { isDarkMode } from './DarkMode';
+import { isDarkMode, isStageTheme } from './DarkMode';
 import Tone3000AuthComplete from './Tone3000AuthComplete';
 import FontTest from './FontTest';
 
@@ -34,10 +34,12 @@ declare module '@mui/material/styles' {
     interface Theme {
         mainBackground: React.CSSProperties['color'];
         toolbarColor: React.CSSProperties['color'];
+        stage: boolean; // true for the "Stage" theme: components may switch to stage-specific styling.
     }
     interface ThemeOptions {
         mainBackground?: React.CSSProperties['color'];
         toolbarColor?: React.CSSProperties['color'];
+        stage?: boolean;
     }
     interface Palette {
         actionBar: Palette['primary'];
@@ -64,7 +66,161 @@ declare module '@mui/material/Button' {
 
 
 
+// "Stage" theme: dark, high-contrast look for the touchscreen kiosk. Near-black
+// ground, flat panels with hairline borders, one warm amber accent (LED/valve glow),
+// geometric display type. Selected in Settings > Color theme.
+import { STAGE } from './StageTheme';
+
+function stageThemeOptions(): Parameters<typeof createTheme>[0] {
+    return {
+        cssVariables: true,
+        stage: true,
+        mainBackground: STAGE.bg,
+        toolbarColor: STAGE.panel,
+        shape: { borderRadius: 6 },
+        typography: {
+            fontFamily: STAGE.bodyFont,
+            fontSize: 14,
+            h6: { fontFamily: STAGE.displayFont, letterSpacing: "0.02em" },
+            subtitle1: { fontFamily: STAGE.displayFont, letterSpacing: "0.02em" },
+            button: { fontFamily: STAGE.displayFont, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 400 },
+            caption: { letterSpacing: "0.02em" },
+        },
+        palette: {
+            mode: 'dark',
+            primary: { main: STAGE.accent, contrastText: "#1a1200" },
+            secondary: { main: "#FF6060" },
+            background: { default: STAGE.bg, paper: STAGE.panel },
+            text: { primary: STAGE.text, secondary: STAGE.textDim },
+            divider: STAGE.border,
+            action: { selected: "rgba(245,165,36,0.14)", selectedOpacity: 0.14, hover: "rgba(245,165,36,0.08)", hoverOpacity: 0.08 },
+            actionBar: { main: STAGE.panel, contrastText: STAGE.text },
+        },
+        components: {
+            MuiCssBaseline: {
+                styleOverrides: {
+                    // Touch instrument, not a web page: no text selection / long-press callouts,
+                    // no scrollbars anywhere (touch scrolling still works), inputs stay editable.
+                    body: { backgroundColor: STAGE.bg, userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' },
+                    'input, textarea': { userSelect: 'text', WebkitUserSelect: 'text' },
+                    '::-webkit-scrollbar': { display: 'none' },
+                    '*': { scrollbarWidth: 'none' },
+                    // Touch UI: no scrollbars in the plugin control panel (content still scrolls).
+                    '#mainPageControls ::-webkit-scrollbar, #pedalboardScroll::-webkit-scrollbar': { display: 'none' },
+                    // Keyboard up: snapshot sheet hugs the top and drops its secondary controls so
+                    // Name + Save stay visible above the keys.
+                    'body.osk-visible .snapshot-sheet .MuiDialog-container': { alignItems: 'flex-start', paddingTop: 6 },
+                    'body.osk-visible .snapshot-sheet .snapshot-sheet-extra': { display: 'none !important' }, // beats the inline display:flex
+                    '@keyframes stageFadeIn': { from: { opacity: 0, transform: 'translateY(6px)' }, to: { opacity: 1, transform: 'none' } },
+                    '[data-stage-fade]': { animation: 'stageFadeIn 180ms cubic-bezier(0.2, 0.8, 0.2, 1)' },
+                    // Touch feedback: tiles and buttons react while pressed (ripples are off in Stage).
+                    '.tempo-widget, .gig-handle, .tempo-sync-chip': { transition: 'transform 90ms ease, filter 90ms ease' },
+                    '.gig-tile:active, .snapshot-tile:active, .tempo-widget:active, .gig-handle:active, .tempo-sync-chip:active': { transform: 'scale(0.97)', filter: 'brightness(1.12)' },
+                    '.MuiButton-root:active, .MuiIconButton-root:active': { filter: 'brightness(1.2)' },
+                    '#mainPageControls *, #pedalboardScroll': { scrollbarWidth: 'none' },
+                },
+            },
+            MuiPaper: {
+                styleOverrides: {
+                    root: { backgroundImage: "none" }, // no MUI elevation tint: flat panels.
+                },
+            },
+            MuiButtonBase: {
+                defaultProps: { disableRipple: true }, // no Material ink ripple
+            },
+            MuiListItemButton: {
+                styleOverrides: {
+                    root: {
+                        '&.Mui-selected': {
+                            backgroundColor: 'rgba(245,165,36,0.14)',
+                            '&:hover': { backgroundColor: 'rgba(245,165,36,0.2)' },
+                        },
+                    },
+                },
+            },
+            MuiAppBar: {
+                styleOverrides: {
+                    root: {
+                        backgroundColor: STAGE.panel,
+                        backgroundImage: "none",
+                        boxShadow: "none",
+                        borderBottom: `1px solid ${STAGE.border}`,
+                    },
+                },
+            },
+            MuiDialog: {
+                styleOverrides: {
+                    paper: { border: `1px solid ${STAGE.border}` },
+                },
+            },
+            MuiDivider: {
+                styleOverrides: { root: { borderColor: STAGE.border } },
+            },
+            MuiButton: {
+                styleOverrides: {
+                    root: {
+                        '& .MuiTouchRipple-ripple': { transform: 'scale(1.9)' },
+                    },
+                    containedPrimary: {
+                        borderRadius: 6,
+                        paddingLeft: "18px", paddingRight: "18px",
+                        boxShadow: "none",
+                        '&:hover': { boxShadow: STAGE.accentGlow },
+                    },
+                    containedSecondary: {
+                        borderRadius: 6,
+                        paddingLeft: "18px", paddingRight: "18px",
+                        boxShadow: "none",
+                    },
+                    outlined: { borderColor: STAGE.border },
+                },
+                variants: [
+                    { props: { variant: 'dialogPrimary' }, style: { color: STAGE.accent } },
+                    { props: { variant: 'dialogSecondary' }, style: { color: STAGE.textDim } },
+                ],
+            },
+            MuiSwitch: {
+                // Bypass toggles read as an LED: dim when off, amber with a glow when on.
+                styleOverrides: {
+                    switchBase: {
+                        '&.Mui-checked .MuiSwitch-thumb': {
+                            backgroundColor: STAGE.accent,
+                            boxShadow: STAGE.accentGlow,
+                        },
+                        '&.Mui-checked + .MuiSwitch-track': {
+                            backgroundColor: STAGE.accent,
+                            opacity: 0.35,
+                        },
+                    },
+                    thumb: { backgroundColor: "#6b7078", boxShadow: "none", transition: `background-color ${STAGE.ease}, box-shadow ${STAGE.ease}` },
+                    track: { backgroundColor: "#3a3d44", opacity: 1 },
+                },
+            },
+            MuiInput: {
+                // Control value fields: hairline underline instead of the Material text-field look.
+                styleOverrides: {
+                    input: { fontVariantNumeric: "tabular-nums" },
+                    underline: {
+                        // Read as a value, not a form field: no underline until focused.
+                        '&:before': { borderBottom: '1px solid transparent' },
+                        '&:hover:not(.Mui-disabled):before': { borderBottom: `1px solid ${STAGE.border}` },
+                        '&:after': { borderBottom: `2px solid ${STAGE.accent}` },
+                    },
+                },
+            },
+
+            MuiTooltip: {
+                styleOverrides: {
+                    // Also the value readout while dragging a knob: big enough to read from standing height.
+                    tooltip: { backgroundColor: STAGE.panelRaised, border: `1px solid ${STAGE.border}`, color: STAGE.text, fontSize: 15, fontFamily: STAGE.displayFont, letterSpacing: "0.03em", padding: "6px 12px", fontVariantNumeric: "tabular-nums" },
+                },
+            },
+        },
+    };
+}
+
 const theme = createTheme(
+    isStageTheme() ? stageThemeOptions() :
     isDarkMode() ?
         {
             cssVariables: true,
@@ -157,7 +313,8 @@ const theme = createTheme(
 
             },
             mainBackground: "#222",
-            toolbarColor: '#222'
+            toolbarColor: '#222',
+            stage: false
         }
         :
         {
@@ -230,7 +387,8 @@ const theme = createTheme(
 
             },
             mainBackground: "#FFFFFF",
-            toolbarColor: '#FFFFFF'
+            toolbarColor: '#FFFFFF',
+            stage: false
 
 
         }

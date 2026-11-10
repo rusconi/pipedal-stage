@@ -19,6 +19,9 @@
 
 #include "pch.h"
 #include <future>
+#include <filesystem>
+#include <cmath>
+#include <algorithm>
 #include "ServiceConfiguration.hpp"
 #include "AudioConfig.hpp"
 #include "ConfigUtil.hpp"
@@ -40,6 +43,7 @@
 #include "DBusToLv2Log.hpp"
 #include "SysExec.hpp"
 #include "Updater.hpp"
+#include "config.hpp"
 #include "util.hpp"
 #include "DBusLog.hpp"
 #include "AvahiService.hpp"
@@ -444,6 +448,7 @@ void PiPedalModel::Load()
     this->audioHost->SetNotificationCallbacks(this);
 
     this->systemMidiBindings = storage.GetSystemMidiBindings();
+    InitBacklight(); // rig: apply the persisted display brightness
 
     this->audioHost->SetSystemMidiBindings(this->systemMidiBindings);
 
@@ -616,6 +621,16 @@ void PiPedalModel::PreviewOutputVolume(float value)
 
 void PiPedalModel::SetControl(int64_t clientId, int64_t pedalItemId, const std::string &symbol, float value)
 {
+    bool leaveTunerMode = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex);
+        leaveTunerMode = pedalItemId != -1 && pedalItemId == autoTunerInstanceId_ && symbol == "MUTE" && value < 0.5f;
+    }
+    if (leaveTunerMode)
+    {
+        RemoveAutoTuner(); // unmuting the borrowed tuner (overlay tap) = leaving tuner mode
+        return;
+    }
     SubscriberList subscribers;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -798,6 +813,10 @@ void PiPedalModel::UpdateCurrentPedalboard(int64_t clientId, Pedalboard &pedalbo
     }
     this->FirePedalboardChanged(clientId, false);
     this->SetPresetChanged(clientId, true);
+    if (!suppressPresetChanged_)
+    {
+        ApplyTempo(GetTempo()); // a port may have just been switched to (or re-subdivided for) tempo sync
+    }
 }
 
 void PiPedalModel::SetPedalboardItemUseModUi(int64_t clientId, int64_t instanceId, bool enabled)
@@ -872,6 +891,7 @@ void PiPedalModel::GetBank(int64_t instanceId, BankFile *pResult)
 
 void PiPedalModel::SetPresetChanged(int64_t clientId, bool value, bool changeSnapshotSelect)
 {
+    if (suppressPresetChanged_) return; // tuner mode inserting/removing its borrowed tuner
     if (changeSnapshotSelect && value && this->pedalboard.selectedSnapshot() != -1)
     {
         auto &snapshot = this->pedalboard.snapshots()[pedalboard.selectedSnapshot()];
@@ -1272,15 +1292,9 @@ void PiPedalModel::OnNotifyNextMidiProgram(const RealtimeNextMidiProgramRequest 
     std::lock_guard<std::recursive_mutex> guard{mutex};
     try
     {
-
-        if (request.direction >= 0)
-        {
-            NextPreset();
-        }
-        else
-        {
-            PreviousPreset();
-        }
+        // Rig: the controller's UP/DOWN switches page the preset switches (bank up/down
+        // on a Quad Cortex) instead of stepping through presets.
+        NextPresetPage(request.direction >= 0 ? Direction::Increase : Direction::Decrease);
     }
     catch (std::exception &e)
     {
@@ -1353,7 +1367,23 @@ void PiPedalModel::OnNotifyMidiProgramChange(RealtimeMidiProgramRequest &midiPro
                 FirePresetsChanged(-1);
             }
         }
-        int64_t presetId = storage.GetPresetByProgramNumber(midiProgramRequest.program);
+        // Rig: programs 0..PRESET_PAGE_SIZE-1 address the current preset page; higher
+        // program numbers keep their absolute meaning.
+        int64_t presetId = -1;
+        if (midiProgramRequest.program < PRESET_PAGE_SIZE)
+        {
+            PresetIndex index;
+            storage.GetPresetIndex(&index);
+            size_t ix = (size_t)(presetPage_ * PRESET_PAGE_SIZE + midiProgramRequest.program);
+            if (ix < index.presets().size())
+            {
+                presetId = index.presets()[ix].instanceId();
+            }
+        }
+        else
+        {
+            presetId = storage.GetPresetByProgramNumber(midiProgramRequest.program);
+        }
         if (presetId == -1)
             throw PiPedalException("No valid preset.");
         LoadPreset(-1, presetId);
@@ -1369,6 +1399,37 @@ void PiPedalModel::OnNotifyMidiProgramChange(RealtimeMidiProgramRequest &midiPro
     }
 }
 
+// Like every scene-based unit (Quad Cortex, Helix, Fractal): when a preset has
+// snapshots, one is always active. A preset saved with no selection lands on its
+// first snapshot. Presets without snapshots are untouched. Call before firing the
+// pedalboard so clients and the audio thread receive the snapshot's values.
+void PiPedalModel::SelectDefaultSnapshot()
+{
+    if (this->pedalboard.selectedSnapshot() != -1)
+    {
+        return;
+    }
+    auto &snapshots = this->pedalboard.snapshots();
+    for (size_t i = 0; i < snapshots.size(); ++i)
+    {
+        if (snapshots[i])
+        {
+            if (this->pedalboard.ApplySnapshot((int64_t)i, pluginHost))
+            {
+                this->pedalboard.selectedSnapshot((int64_t)i);
+                for (auto &snapshot : snapshots)
+                {
+                    if (snapshot)
+                    {
+                        snapshot->isModified_ = false;
+                    }
+                }
+            }
+            return;
+        }
+    }
+}
+
 void PiPedalModel::LoadPreset(int64_t clientId, int64_t instanceId)
 {
     std::lock_guard<std::recursive_mutex> guard{mutex};
@@ -1377,10 +1438,83 @@ void PiPedalModel::LoadPreset(int64_t clientId, int64_t instanceId)
     {
         this->pedalboard = storage.GetCurrentPreset();
         UpdateDefaults(&this->pedalboard);
+        SelectDefaultSnapshot();
+        RefreshTempoFromPedalboard();
+    autoTunerInstanceId_ = -1; // any borrowed tuner went with the old pedalboard
 
         this->hasPresetChanged = false; // no fire.
         this->FirePedalboardChanged(clientId);
         this->FirePresetsChanged(clientId); // fire now.
+
+        int64_t page = PageOfPreset(instanceId);
+        if (page >= 0 && page != presetPage_)
+        {
+            presetPage_ = page;
+            FirePresetPageChanged(page);
+        }
+    }
+}
+
+int64_t PiPedalModel::PageOfPreset(int64_t instanceId)
+{
+    PresetIndex index;
+    storage.GetPresetIndex(&index);
+    const auto &entries = index.presets();
+    for (size_t i = 0; i < entries.size(); ++i)
+    {
+        if (entries[i].instanceId() == instanceId)
+        {
+            return (int64_t)i / PRESET_PAGE_SIZE;
+        }
+    }
+    return -1;
+}
+
+int64_t PiPedalModel::PresetPageCount()
+{
+    PresetIndex index;
+    storage.GetPresetIndex(&index);
+    int64_t n = (int64_t)index.presets().size();
+    return std::max<int64_t>(1, (n + PRESET_PAGE_SIZE - 1) / PRESET_PAGE_SIZE);
+}
+
+int64_t PiPedalModel::GetPresetPage()
+{
+    std::lock_guard<std::recursive_mutex> guard{mutex};
+    return presetPage_;
+}
+
+void PiPedalModel::SetPresetPage(int64_t page)
+{
+    int64_t newPage;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        int64_t count = PresetPageCount();
+        newPage = ((page % count) + count) % count; // wrap
+        if (newPage == presetPage_)
+        {
+            return;
+        }
+        presetPage_ = newPage;
+    }
+    FirePresetPageChanged(newPage);
+}
+
+void PiPedalModel::NextPresetPage(Direction direction)
+{
+    SetPresetPage(presetPage_ + (direction == Direction::Decrease ? -1 : 1));
+}
+
+void PiPedalModel::FirePresetPageChanged(int64_t page)
+{
+    SubscriberList subscribers;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        subscribers = this->subscribers;
+    }
+    for (auto &subscriber : subscribers)
+    {
+        subscriber->OnPresetPageChanged(page);
     }
 }
 
@@ -2190,6 +2324,9 @@ void PiPedalModel::OpenBank(int64_t clientId, int64_t bankId)
     this->pedalboard = storage.GetCurrentPreset();
 
     UpdateDefaults(&this->pedalboard);
+    SelectDefaultSnapshot();
+    RefreshTempoFromPedalboard();
+    autoTunerInstanceId_ = -1; // any borrowed tuner went with the old pedalboard
     this->hasPresetChanged = false;
     this->FirePedalboardChanged(clientId);
 }
@@ -3103,7 +3240,10 @@ bool PiPedalModel::LoadCurrentPedalboard()
     }
 
     Lv2PedalboardErrorList errorMessages;
+    auto tCreate0 = std::chrono::steady_clock::now();
     std::shared_ptr<Lv2Pedalboard> lv2Pedalboard{this->pluginHost.CreateLv2Pedalboard(this->pedalboard, errorMessages)};
+    auto tCreate1 = std::chrono::steady_clock::now();
+    Lv2Log::info("Preset load: CreateLv2Pedalboard %.1f ms", std::chrono::duration<double, std::milli>(tCreate1 - tCreate0).count());
     this->lv2Pedalboard = lv2Pedalboard;
 
     // apply the error messages to the lv2Pedalboard.
@@ -3188,6 +3328,13 @@ UpdateStatus PiPedalModel::GetUpdateStatus()
 void PiPedalModel::UpdateNow(const std::string &updateUrl)
 {
     std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (PIPEDAL_CUSTOM_BUILD_TAG[0] != '\0')
+    {
+        // Installing the upstream package would overwrite the patched binary and web UI.
+        throw std::runtime_error(
+            std::string("This is a custom build (") + PIPEDAL_CUSTOM_BUILD_TAG +
+            "). In-app updates are disabled; redeploy from source instead.");
+    }
     std::filesystem::path fileName, signatureName;
     updater->DownloadUpdate(updateUrl, &fileName, &signatureName);
 
@@ -3338,12 +3485,414 @@ void PiPedalModel::OnNetworkChanged(bool ethernetConnected, bool hotspotConnecte
     FireNetworkChanged();
 }
 
+// Rig: the "tuner" system binding. Toggles the MUTE control of the (first) TooB Tuner
+// in the current preset; the kiosk shows a full-screen tuner while it is muted.
+static const char *TOOB_TUNER_URI = "http://two-play.com/plugins/toob-tuner";
+
+void PiPedalModel::ToggleTunerMute()
+{
+    int64_t instanceId = -1;
+    float current = 0;
+    bool isAuto = false;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        Pedalboard board = this->pedalboard;
+        for (PedalboardItem *item : board.GetAllPlugins())
+        {
+            if (item->uri() == TOOB_TUNER_URI)
+            {
+                instanceId = item->instanceId();
+                const ControlValue *v = item->GetControlValue("MUTE");
+                current = v ? v->value() : 0;
+                break;
+            }
+        }
+        isAuto = instanceId != -1 && instanceId == autoTunerInstanceId_;
+    }
+    if (instanceId == -1)
+    {
+        InsertAutoTuner(); // no tuner in this preset: borrow one for the duration
+        return;
+    }
+    if (isAuto)
+    {
+        RemoveAutoTuner(); // leaving tuner mode: the borrowed tuner goes away entirely
+        return;
+    }
+    SetControl(-1, instanceId, "MUTE", current >= 0.5f ? 0.0f : 1.0f);
+}
+
+void PiPedalModel::InsertAutoTuner()
+{
+    Pedalboard board;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        if (autoTunerInstanceId_ != -1) return;
+        auto info = pluginHost.GetPluginInfo(TOOB_TUNER_URI);
+        if (!info) return;
+        board = this->pedalboard;
+        PedalboardItem item = board.MakeEmptyItem();
+        item.uri(TOOB_TUNER_URI);
+        item.pluginName(info->name());
+        item.isEnabled(true);
+        item.controlValues().push_back(ControlValue("MUTE", 1.0f));
+        board.items().insert(board.items().begin(), item);
+        UpdateDefaults(&board); // remaining control values from the plugin defaults
+        autoTunerInstanceId_ = item.instanceId();
+    }
+    suppressPresetChanged_ = true;
+    try
+    {
+        UpdateCurrentPedalboard(-1, board);
+    }
+    catch (...)
+    {
+        suppressPresetChanged_ = false;
+        throw;
+    }
+    suppressPresetChanged_ = false;
+}
+
+void PiPedalModel::RemoveAutoTuner()
+{
+    Pedalboard board;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        if (autoTunerInstanceId_ == -1) return;
+        board = this->pedalboard;
+        auto &items = board.items();
+        bool found = false;
+        for (auto i = items.begin(); i != items.end(); ++i)
+        {
+            if (i->instanceId() == autoTunerInstanceId_)
+            {
+                items.erase(i);
+                found = true;
+                break;
+            }
+        }
+        autoTunerInstanceId_ = -1;
+        if (!found) return;
+    }
+    suppressPresetChanged_ = true;
+    try
+    {
+        UpdateCurrentPedalboard(-1, board);
+    }
+    catch (...)
+    {
+        suppressPresetChanged_ = false;
+        throw;
+    }
+    suppressPresetChanged_ = false;
+}
+
+// ---- global tap tempo (rig) ----------------------------------------------
+
+static bool TempoToPortValue(Units units, double bpm, float &value)
+{
+    switch (units)
+    {
+    case Units::bpm: value = (float)bpm; return true;
+    case Units::hz:  value = (float)(bpm / 60.0); return true;
+    case Units::s:   value = (float)(60.0 / bpm); return true;
+    case Units::ms:  value = (float)(60000.0 / bpm); return true;
+    default: return false;
+    }
+}
+static bool PortValueToTempo(Units units, float value, double &bpm)
+{
+    if (value <= 0) return false;
+    switch (units)
+    {
+    case Units::bpm: bpm = value; return true;
+    case Units::hz:  bpm = value * 60.0; return true;
+    case Units::s:   bpm = 60.0 / value; return true;
+    case Units::ms:  bpm = 60000.0 / value; return true;
+    default: return false;
+    }
+}
+static constexpr double MIN_TEMPO = 40.0;
+static constexpr double MAX_TEMPO = 300.0;
+
+double PiPedalModel::GetTempo()
+{
+    std::lock_guard<std::recursive_mutex> guard{mutex};
+    return tempo_;
+}
+
+void PiPedalModel::SetTempo(double bpm)
+{
+    if (!(bpm > 0)) return;
+    if (bpm < MIN_TEMPO) bpm = MIN_TEMPO;
+    if (bpm > MAX_TEMPO) bpm = MAX_TEMPO;
+    bpm = std::round(bpm * 10.0) / 10.0;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        tempo_ = bpm;
+    }
+    ApplyTempo(bpm);
+    FireTempoChanged(bpm);
+}
+
+void PiPedalModel::NudgeTempo(int steps)
+{
+    SetTempo(std::round(GetTempo()) + steps);
+}
+
+void PiPedalModel::TapTempo()
+{
+    using clock = std::chrono::steady_clock;
+    auto now = clock::now();
+    double bpm = -1;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        if (!tapTimes_.empty())
+        {
+            double sinceLast = std::chrono::duration<double>(now - tapTimes_.back()).count();
+            if (sinceLast < 60.0 / MAX_TEMPO) return;   // bounce / double trigger
+            if (sinceLast > 2.0) tapTimes_.clear();      // new tap sequence
+        }
+        tapTimes_.push_back(now);
+        while (tapTimes_.size() > 5) tapTimes_.erase(tapTimes_.begin());
+        if (tapTimes_.size() >= 2)
+        {
+            double seconds = std::chrono::duration<double>(tapTimes_.back() - tapTimes_.front()).count() / (double)(tapTimes_.size() - 1);
+            bpm = 60.0 / seconds;
+        }
+    }
+    if (bpm > 0)
+    {
+        SetTempo(bpm);
+    }
+    else
+    {
+        FireTempoChanged(-GetTempo()); // negative = "first tap armed" pulse for the UI, value unchanged
+    }
+}
+
+void PiPedalModel::ApplyTempo(double bpm)
+{
+    struct Target { int64_t instanceId; std::string symbol; float value; };
+    std::vector<Target> targets;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        Pedalboard board = this->pedalboard;
+        for (PedalboardItem *item : board.GetAllPlugins())
+        {
+            for (const MidiBinding &binding : item->midiBindings())
+            {
+                if (binding.bindingType() != BINDING_TYPE_TAP_TEMPO) continue;
+                auto pluginInfo = GetPluginInfo(item->uri());
+                if (!pluginInfo) continue;
+                try
+                {
+                    const Lv2PortInfo &port = pluginInfo->getPort(binding.symbol());
+                    float value;
+                    // rotaryScale of a Tap Tempo binding = beats per repeat (1 = quarter, 0.75 = dotted 8th, ...)
+                    double scale = binding.rotaryScale() > 0 ? binding.rotaryScale() : 1.0;
+                    if (!TempoToPortValue(port.units(), bpm / scale, value)) continue;
+                    float lo = std::min(port.min_value(), port.max_value());
+                    float hi = std::max(port.min_value(), port.max_value());
+                    if (lo < hi) value = std::clamp(value, lo, hi);
+                    targets.push_back({item->instanceId(), binding.symbol(), value});
+                }
+                catch (const std::exception &) { /* port gone */ }
+            }
+        }
+    }
+    for (const Target &t : targets)
+    {
+        SetControl(-1, t.instanceId, t.symbol, t.value);
+    }
+}
+
+void PiPedalModel::RefreshTempoFromPedalboard()
+{
+    double bpm = -1;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        Pedalboard board = this->pedalboard;
+        for (PedalboardItem *item : board.GetAllPlugins())
+        {
+            for (const MidiBinding &binding : item->midiBindings())
+            {
+                if (binding.bindingType() != BINDING_TYPE_TAP_TEMPO) continue;
+                auto pluginInfo = GetPluginInfo(item->uri());
+                if (!pluginInfo) continue;
+                const ControlValue *cv = item->GetControlValue(binding.symbol());
+                if (!cv) continue;
+                try
+                {
+                    const Lv2PortInfo &port = pluginInfo->getPort(binding.symbol());
+                    if (PortValueToTempo(port.units(), cv->value(), bpm))
+                    {
+                        bpm *= binding.rotaryScale() > 0 ? binding.rotaryScale() : 1.0;
+                        break;
+                    }
+                }
+                catch (const std::exception &) {}
+            }
+            if (bpm > 0) break;
+        }
+        if (bpm > 0)
+        {
+            bpm = std::round(std::clamp(bpm, MIN_TEMPO, MAX_TEMPO) * 10.0) / 10.0;
+            if (bpm == tempo_) return;
+            tempo_ = bpm;
+            tapTimes_.clear();
+        }
+    }
+    if (bpm > 0) FireTempoChanged(bpm);
+}
+
+void PiPedalModel::SetTempoPickerOpen(bool open)
+{
+    std::lock_guard<std::recursive_mutex> guard{mutex};
+    tempoPickerOpen_ = open;
+}
+
+void PiPedalModel::FireTempoPickerEvent(int32_t kind, int32_t delta)
+{
+    SubscriberList subscribers;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        subscribers = this->subscribers;
+    }
+    for (auto &subscriber : subscribers)
+    {
+        subscriber->OnTempoPickerEvent(kind, delta);
+    }
+}
+
+// ---- display backlight (rig) ---------------------------------------------
+
+void PiPedalModel::InitBacklight()
+{
+    namespace fs = std::filesystem;
+    try
+    {
+        for (const auto &entry : fs::directory_iterator("/sys/class/backlight"))
+        {
+            std::ifstream maxIn(entry.path() / "max_brightness");
+            int32_t maxValue = 0;
+            if (maxIn >> maxValue && maxValue > 0)
+            {
+                backlightPath_ = entry.path().string();
+                backlightMax_ = maxValue;
+                break;
+            }
+        }
+    }
+    catch (const std::exception &) { /* no backlight */ }
+    if (backlightPath_.empty()) return;
+
+    int32_t percent = -1;
+    {
+        std::ifstream f(storage.GetDataRoot() / "config" / "brightness");
+        if (!(f >> percent)) percent = -1;
+    }
+    if (percent < 0)
+    {
+        std::ifstream cur(std::filesystem::path(backlightPath_) / "brightness");
+        int32_t raw = 0;
+        percent = (cur >> raw) ? (int32_t)std::lround(100.0 * raw / backlightMax_) : 50;
+    }
+    brightness_ = std::clamp(percent, 1, 100);
+    SetBrightness(brightness_, false);
+    Lv2Log::info("Backlight: %s (max %d), brightness %d%%", backlightPath_.c_str(), (int)backlightMax_, (int)brightness_);
+}
+
+int32_t PiPedalModel::GetBrightness()
+{
+    std::lock_guard<std::recursive_mutex> guard{mutex};
+    return backlightPath_.empty() ? -1 : brightness_;
+}
+
+void PiPedalModel::SetBrightness(int32_t percent, bool persist)
+{
+    if (backlightPath_.empty()) return;
+    percent = std::clamp(percent, 1, 100);
+    int32_t raw = std::max<int32_t>(1, (int32_t)std::lround(percent * backlightMax_ / 100.0));
+    {
+        std::ofstream out(std::filesystem::path(backlightPath_) / "brightness");
+        if (!out)
+        {
+            Lv2Log::warning("Backlight: cannot write %s/brightness (is pipedald in the video group?)", backlightPath_.c_str());
+            return;
+        }
+        out << raw;
+    }
+    if (persist)
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        brightness_ = percent;
+        std::ofstream f(storage.GetDataRoot() / "config" / "brightness");
+        f << percent;
+        FireBrightnessChanged(percent);
+    }
+}
+
+void PiPedalModel::FireBrightnessChanged(int32_t percent)
+{
+    SubscriberList subscribers;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        subscribers = this->subscribers;
+    }
+    for (auto &subscriber : subscribers)
+    {
+        subscriber->OnBrightnessChanged(percent);
+    }
+}
+
+void PiPedalModel::FireTempoChanged(double bpm)
+{
+    SubscriberList subscribers;
+    {
+        std::lock_guard<std::recursive_mutex> guard{mutex};
+        subscribers = this->subscribers;
+    }
+    for (auto &subscriber : subscribers)
+    {
+        subscriber->OnTempoChanged(bpm);
+    }
+}
+
 void PiPedalModel::OnNotifyMidiRealtimeEvent(RealtimeMidiEventType eventType)
 {
     try
     {
         switch (eventType)
         {
+        case RealtimeMidiEventType::TapTempo:
+        {
+            bool picker;
+            { std::lock_guard<std::recursive_mutex> guard{mutex}; picker = tempoPickerOpen_; }
+            if (picker) FireTempoPickerEvent(2, 0); // push confirms the highlighted subdivision
+            else TapTempo();
+        }
+        break;
+        case RealtimeMidiEventType::TempoUp:
+        case RealtimeMidiEventType::TempoDown:
+        {
+            int delta = eventType == RealtimeMidiEventType::TempoUp ? 1 : -1;
+            bool picker;
+            { std::lock_guard<std::recursive_mutex> guard{mutex}; picker = tempoPickerOpen_; }
+            if (picker) FireTempoPickerEvent(1, delta); // rotate moves the highlight
+            else NudgeTempo(delta);
+        }
+        break;
+        case RealtimeMidiEventType::TempoPicker:
+        {
+            FireTempoPickerEvent(0, 0); // hold: open (or cancel when already open)
+        }
+        break;
+        case RealtimeMidiEventType::TunerToggle:
+        {
+            ToggleTunerMute();
+        }
+        break;
         case RealtimeMidiEventType::Shutdown:
         {
             this->RequestShutdown(false);
